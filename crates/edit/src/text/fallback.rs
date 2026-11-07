@@ -21,23 +21,31 @@ const JAPANESE_FONT_NAME: &str = "PCJapanese";
 /// The `/Name` of the Type 3 fonts generated for Hebrew text.
 const HEBREW_FONT_NAME: &str = "PCHebrew";
 
+/// The `/Name` of the Type 3 fonts generated for Thai text.
+const THAI_FONT_NAME: &str = "PCThai";
+
 /// The `/Name` of the Type 3 fonts generated from the bundled Latin (Inter) face.
 const LATIN_FONT_NAME: &str = "PCLatin";
 
-/// Whether `font` is one of those generated fonts (Latin, Japanese or Hebrew): a replacement longer
-/// than one of them is split across several, which read back as one line (see [`same_font`]).
+/// Whether `font` is one of those generated fonts (Latin, Japanese, Thai or Hebrew): a replacement
+/// longer than one of them is split across several, which read back as one line (see [`same_font`]).
 pub(super) fn is_type3_fallback(font: &Dict) -> bool {
     font.name(b"Subtype") == Some(b"Type3")
-        && font
-            .name(b"Name")
-            .is_some_and(|n| n == JAPANESE_FONT_NAME.as_bytes() || n == HEBREW_FONT_NAME.as_bytes() || n == LATIN_FONT_NAME.as_bytes())
+        && font.name(b"Name").is_some_and(|n| {
+            n == JAPANESE_FONT_NAME.as_bytes()
+                || n == HEBREW_FONT_NAME.as_bytes()
+                || n == THAI_FONT_NAME.as_bytes()
+                || n == LATIN_FONT_NAME.as_bytes()
+        })
 }
 
-/// The generated font's `/Name` and its resource prefix: the bundled Latin face, Hebrew, or the
-/// Japanese ones.
+/// The generated font's `/Name` and its resource prefix: the bundled Latin face, Thai, Hebrew, or
+/// the Japanese ones.
 fn fallback_names(face: &CraftFont, hebrew: bool) -> (&'static str, &'static str) {
     if hebrew {
         (HEBREW_FONT_NAME, "PCHe")
+    } else if face.covers("Thai") {
+        (THAI_FONT_NAME, "PCTh")
     } else if face.family == "Inter" {
         (LATIN_FONT_NAME, "PCLat")
     } else {
@@ -211,17 +219,24 @@ fn pdf_num(v: f64) -> String {
     if v.fract() == 0.0 { format!("{v:.0}") } else { format!("{v:.4}").trim_end_matches('0').trim_end_matches('.').to_string() }
 }
 
-fn type3_path(face: &CraftFont, ch: char) -> Result<(Vec<u8>, f64), EditError> {
+/// One glyph's CharProc body. `shift` is where a Thai combining mark's outline moves so that its
+/// GPOS position is drawn without the content stream positioning it per character; the glyph then
+/// advances nothing.
+fn type3_path(face: &CraftFont, ch: char, shift: Option<[f64; 2]>) -> Result<(Vec<u8>, f64), EditError> {
     let glyph = japanese_glyph_from(face, ch).map_err(|e| match e {
         GlyphError::NoFont => no_japanese_font(),
         GlyphError::Missing => EditError::Invalid(format!("the {} fallback font has no glyph for U+{:04X}", face.family, ch as u32)),
         GlyphError::TooComplex => EditError::Invalid(format!("the {} fallback glyph U+{:04X} is too complex", face.family, ch as u32)),
     })?;
-    let (dx, width) = proportional(ch, &glyph);
+    let (dx, natural) = proportional(ch, &glyph);
+    let [sx, sy] = shift.unwrap_or([0.0, 0.0]);
+    // A mark has no advance: the base letter keeps the pen and the mark's ink is shifted instead.
+    let width = if shift.is_some() { 0.0 } else { natural };
     let scale = 1000.0;
     // d1 is `wx wy llx lly urx ury` (ISO 32000-2 §9.6.4) with a box enclosing the glyph;
     // Acrobat draws a bullet in place of a glyph whose d1 is malformed.
     let b = if glyph.contours.is_empty() { [0.0; 4] } else { glyph.bbox };
+    let b = [b[0] + sx, b[1] + sy, b[2] + sx, b[3] + sy];
     let mut out = format!(
         "{} 0 {} {} {} {} d1\n",
         pdf_num(width * scale),
@@ -233,9 +248,9 @@ fn type3_path(face: &CraftFont, ch: char) -> Result<(Vec<u8>, f64), EditError> {
     .into_bytes();
     for contour in glyph.contours {
         let Some(first) = contour.first() else { continue };
-        out.extend_from_slice(format!("{} {} m\n", pdf_num((first[0] + dx) * scale), pdf_num(first[1] * scale)).as_bytes());
+        out.extend_from_slice(format!("{} {} m\n", pdf_num((first[0] + dx + sx) * scale), pdf_num((first[1] + sy) * scale)).as_bytes());
         for p in contour.iter().skip(1) {
-            out.extend_from_slice(format!("{} {} l\n", pdf_num((p[0] + dx) * scale), pdf_num(p[1] * scale)).as_bytes());
+            out.extend_from_slice(format!("{} {} l\n", pdf_num((p[0] + dx + sx) * scale), pdf_num((p[1] + sy) * scale)).as_bytes());
         }
         out.extend_from_slice(b"h\n");
     }
@@ -268,17 +283,26 @@ fn unicode_hex(ch: char) -> String {
 /// The same outline for a face that may simply lack the glyph: `None` then, so the caller can try
 /// the next face (and report the character once none of them has it).
 pub(crate) fn type3_glyph(face: &CraftFont, ch: char) -> Result<Option<(Vec<u8>, f64)>, EditError> {
+    type3_glyph_shifted(face, ch, None)
+}
+
+/// [`type3_glyph`], with a Thai mark's shaped position baked into its outline.
+fn type3_glyph_shifted(face: &CraftFont, ch: char, shift: Option<[f64; 2]>) -> Result<Option<(Vec<u8>, f64)>, EditError> {
     match japanese_glyph_from(face, ch) {
         Err(GlyphError::Missing) => Ok(None),
-        _ => type3_path(face, ch).map(Some),
+        _ => type3_path(face, ch, shift).map(Some),
     }
 }
 
-/// No face this build has can draw `text`. Only Japanese text is about the Japanese face: other
-/// characters are missing from the paragraph's font, and choosing a font that has them works too.
+/// No face this build has can draw `text`. Only Japanese and Thai text are about those faces:
+/// other characters are missing from the paragraph's font, and choosing a font that has them works
+/// too.
 pub(crate) fn no_fallback_font(text: &str) -> EditError {
     if text.chars().any(needs_japanese) {
         return no_japanese_font();
+    }
+    if text.chars().any(is_thai_char) && pdfcraft_fonts::document_thai_font().is_none() {
+        return no_thai_font();
     }
     let Some(ch) = text.chars().find(|c| !c.is_whitespace() && !is_win_ansi_char(*c)) else { return no_japanese_font() };
     EditError::Invalid(format!(
@@ -295,12 +319,20 @@ fn needs_japanese(ch: char) -> bool {
     matches!(u32::from(ch), 0x3000..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF)
 }
 
+/// Whether `ch` is in the Thai block (U+0E00–U+0E7F), the script the Thai face is for.
+fn is_thai_char(ch: char) -> bool {
+    matches!(u32::from(ch), 0x0E00..=0x0E7F)
+}
+
 /// The chosen face has no outline for `ch`, and neither has any other: say which character it is and
 /// what the writer can do about it. A CJK character without a Japanese face in the build is about
 /// that build input, which is the one answer that changes it.
 pub(crate) fn no_glyph_for(face: &CraftFont, ch: char) -> EditError {
     if needs_japanese(ch) && pdfcraft_fonts::document_japanese_font().is_none() {
         return no_japanese_font();
+    }
+    if is_thai_char(ch) && pdfcraft_fonts::document_thai_font().is_none() {
+        return no_thai_font();
     }
     EditError::Invalid(format!(
         "the {} fallback font has no glyph for {ch} (U+{:04X}), and no fallback face covers the text; \
@@ -325,6 +357,15 @@ pub(crate) fn fallback_face<'a>(faces: &[&'a CraftFont], chars: &[char], has_gly
     faces.iter().copied().find(|face| chars.iter().all(|ch| has_glyph(face, *ch))).or_else(|| faces.first().copied())
 }
 
+/// This build has no Thai face to draw replacement text with.
+fn no_thai_font() -> EditError {
+    EditError::Invalid(
+        "this text needs PdfCraft's Thai fallback font (Noto Sans Thai), which this build doesn't include \
+         (to build it in, set CRAFT_FONTS_DIR to a craft-fonts checkout that has it)"
+            .into(),
+    )
+}
+
 /// This build has no Hebrew face to draw replacement text with.
 fn no_hebrew_font() -> EditError {
     EditError::Invalid(
@@ -336,14 +377,23 @@ fn no_hebrew_font() -> EditError {
 
 /// The faces a Type 3 replacement may draw `text` with, best first. Text with Hebrew takes the
 /// Hebrew face first (its Latin and digits too, so a line keeps one look), then the Japanese faces
-/// and the bundled Latin one for anything it lacks; other text takes the Japanese faces, and the
-/// bundled Latin face behind them, which covers the Latin, Greek and Cyrillic letters they lack
-/// (#2593: the Japanese faces have no қ, ғ, ҳ, ә, ө, ү, ұ or һ).
+/// and the bundled Latin one for anything it lacks; text with Thai takes the Thai face first, then
+/// the same chain (and without a Thai face the chain alone, so the error names the missing face);
+/// other text takes the Japanese faces, and the bundled Latin face behind them, which covers the
+/// Latin, Greek and Cyrillic letters they lack (#2593: the Japanese faces have no қ, ғ, ҳ, ә, ө, ү,
+/// ұ or һ).
 pub(crate) fn type3_faces(text: &str, family: crate::added::Family, bold: bool) -> Result<(Vec<&'static CraftFont>, bool), EditError> {
     let japanese = pdfcraft_fonts::document_japanese_fonts_for_style(family == crate::added::Family::Times, bold);
     let latin = pdfcraft_fonts::document_latin_fonts(bold);
     if !text.chars().any(crate::bidi::is_hebrew) {
-        return Ok((japanese.into_iter().chain(latin).collect(), false));
+        let mut faces: Vec<&'static CraftFont> = Vec::new();
+        if text.chars().any(is_thai_char)
+            && let Some(thai) = pdfcraft_fonts::document_thai_font()
+        {
+            faces.push(thai);
+        }
+        faces.extend(japanese.into_iter().chain(latin));
+        return Ok((faces, false));
     }
     // Points are drawn on their letter with the font's positioning, which a one-glyph-per-
     // character Type 3 font can't do; refuse rather than print them beside the letter.
@@ -352,6 +402,58 @@ pub(crate) fn type3_faces(text: &str, family: crate::added::Family, bold: bool) 
     }
     let hebrew = pdfcraft_fonts::document_hebrew_font(bold).ok_or_else(no_hebrew_font)?;
     Ok((std::iter::once(hebrew).chain(japanese).chain(latin).collect(), true))
+}
+
+/// The shift (em) that bakes each Thai combining mark's shaped position into its outline.
+///
+/// A replaced word is shown one code per character in one `Tj`: each base letter keeps its own
+/// advance, so the pen has already reached the mark when its glyph is drawn. [`thai_char_offsets`]
+/// reports a mark's position from the start of its shaped cluster, which includes the advances of
+/// the letters before it; the mark's own offset is that position minus the advance of those
+/// letters. Using the reported position alone would move the mark by the base letter a second time.
+/// Only combining marks are moved: SARA AM is reported too, but it is a spacing vowel whose glyph
+/// keeps its advance.
+///
+/// [`thai_char_offsets`]: pdfcraft_fonts::thai_char_offsets
+fn thai_mark_shifts(text: &str, face: &CraftFont) -> HashMap<char, [f64; 2]> {
+    let mut shifts = HashMap::new();
+    if !text.chars().any(is_thai_char) {
+        return shifts;
+    }
+    let offsets: Vec<(char, [f64; 2])> = pdfcraft_fonts::thai_char_offsets(text)
+        .into_iter()
+        .filter(|(ch, offset)| crate::bidi::is_thai_mark(*ch) && (offset[0].abs() > 1e-9 || offset[1].abs() > 1e-9))
+        .collect();
+    if offsets.is_empty() {
+        return shifts;
+    }
+    // The pen (em) at each character within its shaped cluster: a base advances by its own width,
+    // a mark does not. The clusters are the same ones `thai_char_offsets` reports from.
+    let Ok(clusters) = pdfcraft_fonts::shape_thai(text) else { return shifts };
+    let mut pens: Vec<(char, [f64; 2])> = Vec::new();
+    for cluster in clusters {
+        let mut pen = [0.0f64, 0.0];
+        for ch in cluster.text.chars() {
+            pens.push((ch, pen));
+            if let Ok(glyph) = japanese_glyph_from(face, ch) {
+                pen[0] += glyph.width;
+            }
+        }
+    }
+    let mut next = 0usize;
+    for (ch, at) in offsets {
+        let Some(found) = pens.iter().skip(next).position(|(c, _)| *c == ch) else { continue };
+        let index = next.saturating_add(found);
+        let Some((_, pen)) = pens.get(index) else { continue };
+        let shift = [at[0] - pen[0], at[1] - pen[1]];
+        if shift.iter().all(|v| v.is_finite()) {
+            // One glyph per unique character: a mark used on several bases keeps the first
+            // occurrence's position (the same limit the shaped Add Text plan has).
+            shifts.entry(ch).or_insert(shift);
+        }
+        next = index.saturating_add(1);
+    }
+    shifts
 }
 
 pub(super) fn type3_font(
@@ -379,15 +481,20 @@ pub(super) fn type3_font(
     // text keeps the Hebrew face and takes each character it lacks from the next face that has it.
     let face = if hebrew { faces.first().copied() } else { fallback_face(&faces, &chars, |face, ch| japanese_glyph_from(face, ch).is_ok()) }
         .ok_or_else(|| no_fallback_font(text))?;
-    let others: &[&CraftFont] = if hebrew { faces.get(1..).unwrap_or_default() } else { &[] };
+    // Thai text keeps the Thai face and takes each character it lacks from the next face that has
+    // it, as Hebrew text does; the marks' shaped positions are baked into their glyphs.
+    let thai = face.covers("Thai");
+    let others: &[&CraftFont] = if hebrew || thai { faces.get(1..).unwrap_or_default() } else { &[] };
+    let mark_shifts = if thai { thai_mark_shifts(text, face) } else { HashMap::new() };
     // Every outline is read before the document is touched, so a character that fails leaves it
     // as it was. Each font takes the next `per_font` characters; codes restart at 1 in each.
     let per_font = max_glyphs.clamp(1, MAX_TYPE3_GLYPHS);
     let mut glyphs = Vec::with_capacity(chars.len());
     for (i, ch) in chars.into_iter().enumerate() {
-        // The chosen face first, then the faces after it (Hebrew text takes a character the Hebrew
-        // face lacks from the next face that has it); a character no face draws is reported once.
-        let mut drawn = type3_glyph(face, ch)?;
+        // The chosen face first, then the faces after it (Hebrew and Thai text take a character
+        // the chosen face lacks from the next face that has it); a character no face draws is
+        // reported once.
+        let mut drawn = type3_glyph_shifted(face, ch, mark_shifts.get(&ch).copied())?;
         for f in others.iter().copied() {
             if drawn.is_some() {
                 break;

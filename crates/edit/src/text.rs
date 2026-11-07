@@ -37,7 +37,7 @@ mod rewrite;
 
 use blocks::paragraph_separator;
 #[cfg(test)]
-use blocks::wrap;
+pub(crate) use blocks::wrap;
 pub use blocks::{
     BlockKey, BlockStyle, RangeStyle, ReadingBlocks, TextBlock, block_overlapping, clear_block, reading_blocks, reading_blocks_checked,
     replace_block, text_blocks,

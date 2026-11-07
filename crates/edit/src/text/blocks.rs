@@ -337,16 +337,37 @@ pub(crate) fn paragraph_separator(c: char) -> bool {
     c.is_whitespace() && c != '\u{3000}'
 }
 
+/// The pieces of a white-space-free `word` that a row may end between, joined with nothing.
+/// Thai writes its words without spaces, so its break opportunities are the dictionary's word
+/// boundaries ([`pdfcraft_fonts::segment::words`]); every other run keeps the ideographic pieces
+/// of [`crate::linebreak::pieces`]. A dictionary word is never cut, even when it is wider than
+/// the line: it overflows as a whole rather than split mid-word.
+fn word_pieces(word: &str) -> Vec<&str> {
+    if !word.chars().any(pdfcraft_fonts::segment::is_thai) {
+        return crate::linebreak::pieces(word);
+    }
+    let mut out = Vec::new();
+    for segment in pdfcraft_fonts::segment::words(word) {
+        if segment.chars().any(pdfcraft_fonts::segment::is_thai) {
+            out.push(segment);
+        } else {
+            out.extend(crate::linebreak::pieces(segment));
+        }
+    }
+    out
+}
+
 /// Greedy word wrapping to `width` with `advance` giving a string's width. Each `\n` starts a
-/// new line. A row may also end inside a word of Chinese or Japanese text ([`crate::linebreak`]);
-/// those pieces join without a space. Every white-space character is written as one space, so
+/// new line. A row may also end inside a word of Chinese or Japanese text ([`crate::linebreak`]),
+/// or at a dictionary word boundary inside Thai text ([`word_pieces`]); those pieces join without
+/// a space. Every white-space character is written as one space, so
 /// a run of spaces typed between, before or after words stays (#4199); only the spaces where a
 /// row wraps are dropped (recorded as the third value, so a later rejoin can restore the exact
 /// count instead of guessing one, #2529). The bool is true when the line continues the previous
 /// one because the next word did not fit, rather than because of a newline; the number is how
 /// many separator characters stood where that wrap fell (0 for a Chinese/Japanese word split,
 /// which has no space of its own; meaningless when the bool is false).
-pub(super) fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<(String, bool, usize)> {
+pub(crate) fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<(String, bool, usize)> {
     let mut out = Vec::new();
     for row in text.split('\n') {
         let mut line = String::new();
@@ -365,7 +386,7 @@ pub(super) fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec
             }
             let gap_here = std::mem::take(&mut gap);
             let spaces = " ".repeat(gap_here);
-            for (i, piece) in crate::linebreak::pieces(word).into_iter().enumerate() {
+            for (i, piece) in word_pieces(word).into_iter().enumerate() {
                 let candidate = if i == 0 { format!("{line}{spaces}{piece}") } else { format!("{line}{piece}") };
                 // A row holding only the spaces that indent it doesn't wrap before its first word.
                 if line.chars().any(|c| c != ' ') && advance(&candidate) > width {

@@ -52,6 +52,20 @@ fn is_mark(c: char) -> bool {
         )
 }
 
+/// Thai combining marks that ride on the character before them: the vowels and tone marks drawn
+/// above, below or after a consonant (U+0E31 MAI HAN-AKAT, U+0E34–U+0E3A, U+0E47–U+0E4E).
+/// Kept apart from [`is_mark`] so the Arabic and Hebrew grouping does not change.
+pub(crate) fn is_thai_mark(c: char) -> bool {
+    matches!(u32::from(c), 0x0E31 | 0x0E34..=0x0E3A | 0x0E47..=0x0E4E)
+}
+
+/// Whether `c` stays in the cluster of the character before it. Besides the combining marks,
+/// U+0E33 SARA AM joins its consonant: it is one spacing vowel in Unicode but reads as the
+/// cluster's final mark, so a cursor must not land between it and the base.
+fn joins_previous(c: char) -> bool {
+    is_mark(c) || is_thai_mark(c) || c == '\u{0E33}'
+}
+
 /// Direction marks, embeddings, overrides and isolates: they steer the reordering and are not drawn.
 fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
@@ -106,11 +120,18 @@ fn clusters(s: &str) -> Vec<Cluster> {
     let mut out: Vec<Cluster> = Vec::new();
     for c in s.chars() {
         match out.last_mut() {
-            Some(last) if is_mark(c) => last.text.push(c),
+            Some(last) if joins_previous(c) => last.text.push(c),
             _ => out.push(Cluster { text: c.to_string(), class: class(c) }),
         }
     }
     out
+}
+
+/// The text of every cluster [`clusters`] finds, in order. The tests outside this module use it
+/// to check that a cursor cannot land between a Thai base and its marks.
+#[cfg(test)]
+pub(crate) fn cluster_texts(s: &str) -> Vec<String> {
+    clusters(s).into_iter().map(|c| c.text).collect()
 }
 
 /// Whether the line reads right to left as a whole: more right-to-left letters than

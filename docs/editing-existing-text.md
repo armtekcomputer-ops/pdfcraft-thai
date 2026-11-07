@@ -35,8 +35,8 @@ no open-licence declaration are refused. Interface fallback fonts are never expo
 The full selected program, glyph mappings, widths and Unicode text are embedded in the PDF.
 Saving and reopening therefore needs no locally installed font. Editing the same text again
 reuses the font resource the page already has, and every resource made from one program
-shares a single copy of it. The Type 3 fonts generated for Japanese or Hebrew characters the
-page's fonts lack are made anew by each edit; after an edit, those nothing on the page shows any
+shares a single copy of it. The Type 3 fonts generated for Japanese, Hebrew or Thai characters
+the page's fonts lack are made anew by each edit; after an edit, those nothing on the page shows any
 more leave the page's resources, unless some content that could name them can't be read.
 Original subset bytes are
 preserved. Optional matching faces from `CRAFT_FONTS_DIR` can also complete source subsets;
@@ -57,11 +57,23 @@ Rewrapped Chinese and Japanese text, which has no spaces between words, may brea
 two characters. A row never begins with closing punctuation, a closing bracket or quote, a small
 kana or the prolonged sound mark, and never ends with an opening bracket or quote or a currency
 sign before an amount: the line-start and line-end rules of JIS X 4051, as in Unicode line
-breaking (UAX #14). Latin words inside such text are not split. Existing-text rewrap still breaks
-Korean and Thai only at spaces. Add Text is different for Thai: it wraps at the word boundaries
-the dictionary finds (`pdfcraft_fonts::segment`, ICU4X) and breaks inside a word only when that
-word alone is wider than the box, between shaped clusters so a mark stays with its base. Latin
-words inside Thai text keep their measured widths.
+breaking (UAX #14). Latin words inside such text are not split. The generic line breaking is
+unchanged: it still breaks Korean and Thai only at spaces. Add Text is different for Thai: it
+wraps at the word boundaries the dictionary finds (`pdfcraft_fonts::segment`, ICU4X) and breaks
+inside a word only when that word alone is wider than the box, between shaped clusters so a mark
+stays with its base. Latin words inside Thai text keep their measured widths. An edited Thai
+clause is rewrapped the same way, on the edited-block path described below; the generic
+`linebreak` path is not involved.
+
+Edit text replaces existing text with Thai even when the page's own font has no Thai glyphs. The
+Type 3 fallback prefers `document_thai_font()` for U+0E00–U+0E7F text and names the generated
+font `/PCThai`; each mark's GPOS offset is baked into its CharProc and the mark is given a zero
+advance, so it sits over its base rather than after it. A build without the Thai face reports
+that instead of failing on a missing glyph. Thai combining marks join their base for cursor
+movement, selection and deletion (`is_thai_mark`, and SARA AM joins the preceding cluster), and an
+edited Thai clause rewraps at dictionary word boundaries. Two limits remain: a mark reused on
+several bases keeps the first occurrence's baked offset, because fallback glyphs are keyed per
+character; and the mixed-style styled-region path still breaks Thai only at spaces.
 
 Select text within the editor before changing size, colour, font, underline or spacing to
 format that selection. Automation supports up to 1024 disjoint UTF-8 byte ranges with the

@@ -20,6 +20,11 @@
 | เปิด Thai UI: ตรวจพบว่า catalog มีแล้ว + เพิ่ม tests `thai_catalog_loads` และแก้ docs ที่ค้าง | `877e3a37` |
 | D6 accuracy corpus (public domain): ASEAN Charter 6 หน้า 200 dpi, 4,199 ตัวอักษร, CER 2.12% | `cargo xtask ocr-bench` |
 
+### ทำได้บางส่วน (partial)
+| งาน | ทำได้แล้ว | เหลือ |
+|---|---|---|
+| Edit text ไทย (ข้อความเดิมในหน้า) | Type 3 fallback เลือก `document_thai_font()` สำหรับ U+0E00–U+0E7F (ฟอนต์ชื่อ `/PCThai`), bake GPOS offset ของ mark ลง CharProc พร้อม zero advance, build ที่ไม่มี Thai face แจ้งชัดแทนการล้มบน missing glyph; mark ไทยรวม cluster กับ base ตอน cursor/selection/delete (`is_thai_mark`, SARA AM ต่อ cluster ก่อนหน้า); clause ไทยที่แก้ตัดบรรทัดใหม่ตามขอบเขตคำจากพจนานุกรม | ใช้ฟอนต์ไทยที่หน้า PDF ฝังอยู่เอง (Slice A); styled-region path (mixed style) ยังตัดไทยที่ช่องว่างเท่านั้น |
+
 ### ยังไม่ปิด — ติดข้อจำกัดภายนอกหรือต้องคนไทยตรวจ
 | งาน | เหตุที่ยังทำไม่ได้ |
 |---|---|
@@ -27,7 +32,6 @@
 | A2 Thai Bold / A3 oblique | craft-fonts pin `b076417b` มีเฉพาะ Noto Sans Thai Regular |
 | D3 offline ONNX Thai | ยังไม่มีโมเดลที่ license เปิดและรันบน rten ได้; ใช้ tesseract `tha` แทน |
 | B3 justify / B5 PDF/UA tagging | ต่อยอดจาก segmentation ที่มีแล้ว แต่ยังไม่เริ่ม |
-| Edit text ไทย (ข้อความเดิมในหน้า) | ต้องออกแบบ cluster run splitting ใน `crates/edit` — งานใหญ่ |
 | วรรณยุกต์แทนที่ด้วย glyph อื่นจะผ่าน pixel test | ต้องมี golden image (ยืนยันรูปร่าง) ไม่ใช่แค่ pixel diff |
 
 

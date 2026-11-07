@@ -7745,12 +7745,12 @@ fn a_subset_program_is_not_trusted_for_new_characters_and_the_error_names_the_ch
     let face = pdfcraft_fonts::document_japanese_font_for_style(false, false).map_or("Inter", |f| f.family);
     assert_eq!(edit.substituted, Some(format!("{face} Type3")));
     assert_eq!(text::text_blocks(&reopen(&doc), 0).unwrap()[0].editor_text, "Stable tőxt");
-    // A character no fallback face has is refused, named, and left as it was.
+    // A character no fallback face has (an emoji) is refused, named, and left as it was.
     let mut doc = embedded_program_page("BT /F1 12 Tf 72 700 Td (Stable text) Tj ET", "ABCDEF+Inter-Regular");
     let before = page_content_bytes(&doc, 0);
-    let result = text::rewrite_block(&mut doc, 0, 0, Some("Stable กtext"), &text::BlockStyle::default());
+    let result = text::rewrite_block(&mut doc, 0, 0, Some("Stable \u{1F600}text"), &text::BlockStyle::default());
     let Err(EditError::Invalid(msg)) = result else { panic!("expected a clear error, got {result:?}") };
-    assert!(msg.contains("ก (U+0E01)") && msg.contains("Load font") && !msg.contains("Japanese"), "{msg}");
+    assert!(msg.contains("U+1F600") && msg.contains("Load font"), "{msg}");
     assert_eq!(page_content_bytes(&doc, 0), before);
 }
 
@@ -10827,4 +10827,161 @@ fn review_inside_scope_group_move_matches_direct_transform_under_outer_scale() {
             );
         }
     }
+}
+
+/// A Thai base and the vowels and tone marks drawn on it are one cluster, so a cursor, a
+/// selection or a deletion cannot land between them.
+#[test]
+fn thai_marks_stay_with_their_base_for_the_cursor() {
+    assert_eq!(bidi::cluster_texts("น้ำใจ"), ["น้ำ", "ใ", "จ"]);
+    // `ร` carries both the vowel (U+0E31) and the tone mark (U+0E49); `ค` and `ง` are bases of
+    // their own.
+    assert_eq!(bidi::cluster_texts("ครั้งที่"), ["ค", "ร\u{0E31}\u{0E49}", "ง", "ที่"]);
+    for text in ["น้ำใจ", "ครั้งที่"] {
+        let clusters = bidi::cluster_texts(text);
+        assert_eq!(clusters.concat(), text, "clustering must not reorder or lose text");
+        for cluster in clusters {
+            let first = cluster.chars().next().unwrap();
+            assert!(!bidi::is_thai_mark(first), "a cursor boundary splits {cluster:?} from its base");
+        }
+    }
+}
+
+/// A long Thai clause with no spaces still rewraps: every row ends where the dictionary ends a
+/// word, and the rows join back into the clause unchanged.
+#[test]
+fn edited_thai_rewraps_only_between_words() {
+    let clause = "สวัสดีครับภาษาไทยการทดสอบ";
+    // One unit per character, so a width of 10 is ten characters; no fonts are involved.
+    let advance = |s: &str| s.chars().count() as f64;
+    let mut ends = std::collections::HashSet::new();
+    let mut at = 0usize;
+    for word in pdfcraft_fonts::segment::words(clause) {
+        at += word.chars().count();
+        ends.insert(at);
+    }
+    let rows: Vec<String> = text::wrap(clause, 10.0, advance).into_iter().map(|(row, ..)| row).collect();
+    assert!(rows.len() > 1, "the clause should wrap: {rows:?}");
+    assert_eq!(rows.concat(), clause, "a wrap loses nothing");
+    let mut at = 0usize;
+    for row in &rows {
+        at += row.chars().count();
+        assert!(ends.contains(&at), "row boundary at {at} of {row:?} is not a dictionary word boundary");
+    }
+}
+
+/// The codes and characters in a generated Type 3 font's `/ToUnicode` map, in map order.
+fn type3_unicode_pairs(doc: &Document, font: &Dict) -> Vec<(u8, char)> {
+    let map = font.get(b"ToUnicode").expect("/ToUnicode");
+    let stream = String::from_utf8(stream_bytes(doc, map).expect("ToUnicode stream")).expect("UTF-8 CMap");
+    let mut out = Vec::new();
+    let mut in_bfchar = false;
+    for line in stream.lines() {
+        if line.contains("endbfchar") {
+            in_bfchar = false;
+            continue;
+        }
+        if line.contains("beginbfchar") {
+            in_bfchar = true;
+            continue;
+        }
+        if !in_bfchar {
+            continue;
+        }
+        let Some((code, rest)) = line.trim().strip_prefix('<').and_then(|l| l.split_once("> <")) else { continue };
+        let Some(value) = rest.strip_suffix('>') else { continue };
+        let (Ok(code), Some(ch)) = (u8::from_str_radix(code, 16), u32::from_str_radix(value, 16).ok().and_then(char::from_u32)) else {
+            continue;
+        };
+        out.push((code, ch));
+    }
+    out
+}
+
+/// The page's generated font whose resource name starts with `prefix`.
+fn generated_font(doc: &Document, prefix: &[u8]) -> Dict {
+    let p = pdfcraft_model::pages(doc).swap_remove(0);
+    let res = doc.resolve(p.dict.get(b"Resources").expect("Resources"));
+    let fonts = doc.resolve(res.as_dict().unwrap().get(b"Font").expect("Font")).as_dict().unwrap().clone();
+    let (_, font) = fonts.iter().find(|(name, _)| name.starts_with(prefix)).unwrap_or_else(|| panic!("no font named {prefix:?}"));
+    doc.resolve(font).as_dict().cloned().expect("font dictionary")
+}
+
+/// Thai characters the page's font lacks are drawn with the Thai face from craft-fonts, as Hebrew
+/// letters are: a Type 3 font of its own, one glyph per character, whose `/ToUnicode` map (and the
+/// reopened page) gives back the typed word.
+#[test]
+fn replacing_text_with_thai_uses_the_thai_fallback_face() {
+    if pdfcraft_fonts::document_thai_font().is_none() {
+        eprintln!("skipping replacing_text_with_thai_uses_the_thai_fallback_face: this build has no Thai face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let word = "น้ำใจ";
+    // Helvetica (WinAnsi) has no Thai glyph, so the line must take the fallback.
+    let mut doc = text_page("BT /F1 12 Tf 72 700 Td (Hello) Tj ET");
+    let result = text::replace_line(&mut doc, 0, 0, word).unwrap();
+    assert_eq!(result.substituted.as_deref(), Some("Noto Sans Thai Type3"));
+    let content = String::from_utf8_lossy(&page_content_bytes(&doc, 0)).into_owned();
+    assert!(content.contains("/PCTh"), "{content}");
+
+    let font = generated_font(&doc, b"PCTh");
+    assert_eq!(font.name(b"Subtype"), Some(&b"Type3"[..]));
+    assert_eq!(font.name(b"Name"), Some(&b"PCThai"[..]));
+    let descriptor = doc.resolve(font.get(b"FontDescriptor").expect("FontDescriptor")).as_dict().cloned().unwrap();
+    assert_eq!(descriptor.name(b"FontName"), Some(&b"NotoSansThai-Regular"[..]), "the face is Noto Sans Thai");
+
+    // `/Differences` names one glyph per unique character, and `/ToUnicode` maps each code back to
+    // that character, in order of first appearance.
+    let encoding = doc.resolve(font.get(b"Encoding").expect("Encoding")).as_dict().cloned().unwrap();
+    let differences = doc.resolve(encoding.get(b"Differences").expect("Differences")).as_array().cloned().unwrap();
+    assert_eq!(differences.first().and_then(|o| o.as_int()), Some(1), "codes start at 1");
+    assert!(differences.iter().skip(1).all(|o| o.as_name().is_some_and(|n| n.starts_with(b"g"))), "{differences:?}");
+    let pairs = type3_unicode_pairs(&doc, &font);
+    let unique: Vec<char> = word.chars().collect();
+    assert_eq!(pairs.iter().map(|(_, c)| *c).collect::<Vec<_>>(), unique);
+    assert_eq!(pairs.iter().map(|(code, _)| *code).collect::<Vec<_>>(), (1..=unique.len() as u8).collect::<Vec<_>>());
+
+    // Extraction and copy read the word back after a save and reopen.
+    let doc = reopen(&doc);
+    assert_eq!(text::text_lines(&doc, 0).unwrap()[0].text, word);
+    assert_eq!(text::text_blocks(&doc, 0).unwrap()[0].text, word);
+}
+
+/// A Thai combining mark is drawn without advancing the pen (its `d1` width is 0) and with the
+/// GPOS offset baked into its outline, so it sits over the base letter; `/ToUnicode` still maps it
+/// and the word reads back whole.
+#[test]
+fn a_thai_mark_in_the_fallback_has_no_advance_and_a_shifted_outline() {
+    let Some(face) = pdfcraft_fonts::document_thai_font() else {
+        eprintln!("skipping a_thai_mark_in_the_fallback_has_no_advance_and_a_shifted_outline: this build has no Thai face (set CRAFT_FONTS_DIR)");
+        return;
+    };
+    // U+0E39 (the vowel in ปู่) is shifted 0.014 em left of the pen, a visible GPOS adjustment.
+    let word = "ปู่";
+    let mut doc = text_page("BT /F1 12 Tf 72 700 Td (Hello) Tj ET");
+    text::replace_line(&mut doc, 0, 0, word).unwrap();
+    let font = generated_font(&doc, b"PCTh");
+    let pairs = type3_unicode_pairs(&doc, &font);
+    let Some((code, _)) = pairs.iter().find(|(_, c)| *c == '\u{0E39}') else { panic!("the mark maps back: {pairs:?}") };
+    let code = *code;
+    let charprocs = doc.resolve(font.get(b"CharProcs").expect("CharProcs")).as_dict().cloned().unwrap();
+    let proc = charprocs.get(format!("g{code:02X}").as_bytes()).expect("the mark's CharProc");
+    let path = String::from_utf8(stream_bytes(&doc, proc).expect("glyph stream")).unwrap();
+    assert!(path.starts_with("0 0 "), "a mark advances nothing: {path}");
+    let d1: Vec<&str> = path.lines().next().unwrap().split_whitespace().collect();
+    assert_eq!((d1.len(), d1[0], d1[1]), (7, "0", "0"), "`wx wy` of d1: {path}");
+    assert_eq!(d1[6], "d1", "{path}");
+
+    // Compare its ink box against the face's own outline: it moved by the mark's GPOS offset.
+    let raw = pdfcraft_fonts::japanese_glyph_from(face, '\u{0E39}').expect("the mark's outline");
+    let base = pdfcraft_fonts::japanese_glyph_from(face, 'ป').expect("the base's outline");
+    let at = pdfcraft_fonts::thai_char_offsets(word).into_iter().find(|(c, _)| *c == '\u{0E39}').expect("the shaped run places the mark").1;
+    let shift = at[0] - base.width;
+    assert!((-0.05..=-0.005).contains(&shift), "the fixture needs a visible GPOS shift, got {shift}");
+    let left = d1[2].parse::<f64>().unwrap();
+    let expected = ((raw.bbox[0] + shift) * 1000.0).floor();
+    assert!((left - expected).abs() <= 1.0, "outline x {left} is not the raw {} shifted by {shift}", raw.bbox[0] * 1000.0);
+    assert!(pairs.iter().any(|(c, ch)| *c == code && *ch == '\u{0E39}'), "ToUnicode still maps the mark");
+
+    assert_eq!(text::text_lines(&reopen(&doc), 0).unwrap()[0].text, word);
 }
