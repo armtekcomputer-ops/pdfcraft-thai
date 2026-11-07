@@ -4,7 +4,7 @@
 
 ## 0. สถานะความคืบหน้า
 
-### ปิดแล้ว (มี commit ใน repo นี้)
+### ปิดแล้ว (มี commit ใน repo นี้ หรืออยู่ใน working tree)
 | งาน | Commit |
 |---|---|
 | T1 เสนอภาษาไทย + route ไป Tesseract (ไม่ส่งให้ ocrs) | `376ecbe4` |
@@ -19,11 +19,12 @@
 | TIS-620/CP874 ทั้ง extraction และ renderer (vendored patch 76) | `0d72ad49` |
 | เปิด Thai UI: ตรวจพบว่า catalog มีแล้ว + เพิ่ม tests `thai_catalog_loads` และแก้ docs ที่ค้าง | `877e3a37` |
 | D6 accuracy corpus (public domain): ASEAN Charter 6 หน้า 200 dpi, 4,199 ตัวอักษร, CER 2.12% | `cargo xtask ocr-bench` |
+| ใช้ฟอนต์ไทยที่หน้า PDF ฝังอยู่เอง (Slice A): ToUnicode + explicit zero width นำกลับมาใช้ ไม่ตกไป Type3 | working tree |
 
 ### ทำได้บางส่วน (partial)
 | งาน | ทำได้แล้ว | เหลือ |
 |---|---|---|
-| Edit text ไทย (ข้อความเดิมในหน้า) | Type 3 fallback เลือก `document_thai_font()` สำหรับ U+0E00–U+0E7F (ฟอนต์ชื่อ `/PCThai`), bake GPOS offset ของ mark ลง CharProc พร้อม zero advance, build ที่ไม่มี Thai face แจ้งชัดแทนการล้มบน missing glyph; mark ไทยรวม cluster กับ base ตอน cursor/selection/delete (`is_thai_mark`, SARA AM ต่อ cluster ก่อนหน้า); clause ไทยที่แก้ตัดบรรทัดใหม่ตามขอบเขตคำจากพจนานุกรม | ใช้ฟอนต์ไทยที่หน้า PDF ฝังอยู่เอง (Slice A); styled-region path (mixed style) ยังตัดไทยที่ช่องว่างเท่านั้น |
+| Edit text ไทย (ข้อความเดิมในหน้า) | Type 3 fallback เลือก `document_thai_font()` สำหรับ U+0E00–U+0E7F (ฟอนต์ชื่อ `/PCThai`), bake GPOS offset ของ mark ลง CharProc พร้อม zero advance, build ที่ไม่มี Thai face แจ้งชัดแทนการล้มบน missing glyph; ฟอนต์ของหน้าเองถูกใช้ซ้ำเมื่อ `/ToUnicode` ระบุ code และ width เป็น zero ชัดเจน (Slice A) จึงไม่ต้องสร้าง Type3 สำหรับอักษรที่หน้ามีอยู่แล้ว; mark ไทยรวม cluster กับ base ตอน cursor/selection/delete (`is_thai_mark`, SARA AM ต่อ cluster ก่อนหน้า); clause ไทยที่แก้ตัดบรรทัดใหม่ตามขอบเขตคำจากพจนานุกรม | styled-region path (mixed style) ยังตัดไทยที่ช่องว่างเท่านั้น |
 
 ### ยังไม่ปิด — ติดข้อจำกัดภายนอกหรือต้องคนไทยตรวจ
 | งาน | เหตุที่ยังทำไม่ได้ |

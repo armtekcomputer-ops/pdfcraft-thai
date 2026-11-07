@@ -10907,6 +10907,57 @@ fn generated_font(doc: &Document, prefix: &[u8]) -> Dict {
     doc.resolve(font).as_dict().cloned().expect("font dictionary")
 }
 
+/// One page whose own simple font carries Thai in `/ToUnicode`: code 1 น, 2 ้, 3 ำ, 4 ใ, 5 จ,
+/// 6 ด. Base letters have a positive `/Widths` entry; the combining mark an explicit zero.
+fn thai_page(content: &str) -> Document {
+    let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
+                 1 begincodespacerange <00> <FF> endcodespacerange 6 beginbfchar \
+                 <01> <0E19> <02> <0E49> <03> <0E33> <04> <0E43> <05> <0E08> <06> <0E14> \
+                 endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let mut doc = text_page(content);
+    let unicode = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap)));
+    let font = Dict::from_iter([
+        (b"Type".to_vec(), Object::name("Font")),
+        (b"Subtype".to_vec(), Object::name("Type1")),
+        (b"BaseFont".to_vec(), Object::name("Helvetica")),
+        (b"FirstChar".to_vec(), Object::Int(1)),
+        (b"LastChar".to_vec(), Object::Int(6)),
+        (b"Widths".to_vec(), Object::Array([500, 0, 500, 500, 500, 500].map(Object::Int).to_vec())),
+        (b"ToUnicode".to_vec(), Object::Ref(unicode)),
+    ]);
+    let resources = Dict::from_iter([(b"Font".to_vec(), Object::Dict(Dict::from_iter([(b"F1".to_vec(), Object::Dict(font))])))]);
+    let p = pdfcraft_model::pages(&doc)[0].obj;
+    doc.update_dict(p, |d| d.set(b"Resources".to_vec(), Object::Dict(resources))).unwrap();
+    doc
+}
+
+/// A Thai combining mark has no advance of its own, but the page's font lists it with an explicit
+/// zero width. Editing Thai text must keep that font, not switch to the Type 3 fallback.
+#[test]
+fn editing_thai_keeps_the_pages_own_font() {
+    let mut doc = thai_page("BT /F1 12 Tf 72 700 Td <010203> Tj ET");
+    assert_eq!(text::text_lines(&doc, 0).unwrap()[0].text, "น้ำ");
+    let edited = text::replace_line(&mut doc, 0, 0, "น้ำใจ").unwrap();
+    assert_eq!(edited.substituted, None, "the page's own font shows every character");
+    let content = String::from_utf8_lossy(&page_content_bytes(&doc, 0)).into_owned();
+    assert!(content.contains("0102030405"), "the new text is drawn in the source font's codes: {content}");
+    assert!(!content.contains("PCThai") && !content.contains("PCHe"), "{content}");
+    let ops = pdfcraft_content::parse(&page_content_bytes(&doc, 0)).ops;
+    assert!(ops.iter().filter(|o| o.is("Tf")).all(|o| o.operands.first().and_then(|n| n.as_name()) == Some(b"F1".as_slice())), "{ops:?}");
+    let shown = ops.iter().find(|o| o.is("Tj")).and_then(|o| o.operands.first()).and_then(|s| s.as_string()).expect("a Tj in /F1");
+    assert_eq!(shown.bytes, [1, 2, 3, 4, 5], "consonant, mark, SARA AM, then ใ, จ");
+
+    // Saved, the page still has its one font under /F1, not a generated one beside it.
+    let doc = reopen(&doc);
+    let p = pdfcraft_model::pages(&doc).swap_remove(0);
+    let res = doc.resolve(p.dict.get(b"Resources").unwrap());
+    let fonts = doc.resolve(res.as_dict().unwrap().get(b"Font").unwrap());
+    let fonts = fonts.as_dict().unwrap();
+    assert_eq!(fonts.iter().count(), 1, "{fonts:?}");
+    assert!(fonts.iter().all(|(name, _)| !name.starts_with(b"PCThai") && !name.starts_with(b"PCHe")), "{fonts:?}");
+    assert_eq!(text::text_lines(&doc, 0).unwrap()[0].text, "น้ำใจ");
+}
+
 /// Thai characters the page's font lacks are drawn with the Thai face from craft-fonts, as Hebrew
 /// letters are: a Type 3 font of its own, one glyph per character, whose `/ToUnicode` map (and the
 /// reopened page) gives back the typed word.

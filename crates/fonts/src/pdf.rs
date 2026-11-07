@@ -888,8 +888,35 @@ impl Metrics {
     }
 
     /// Whether `code` shows exactly `c` and has a glyph for it.
+    ///
+    /// A Thai combining mark has no advance of its own: the page's font lists it in `/Widths` (or
+    /// `/W`, or through `/DW`) with an explicit zero, and `has_glyph` reads a zero as a missing
+    /// glyph. The font still lists the code, and its ToUnicode says what that code draws, so edited
+    /// Thai text keeps the page's font rather than falling back to the Type3 replacement. Only a
+    /// Thai mark takes this path: for any other character an explicit zero width is no evidence of
+    /// a glyph, and a code with no width entry at all stays refused — a subset that dropped the
+    /// glyph has none, and its ToUnicode may outlive it.
     fn shows(&self, code: u32, c: char) -> bool {
-        self.unicode.text(code).is_some_and(|t| t.chars().eq(std::iter::once(c))) && self.has_glyph(code)
+        if !self.unicode.text(code).is_some_and(|t| t.chars().eq(std::iter::once(c))) {
+            return false;
+        }
+        self.has_glyph(code) || (is_thai_mark(c) && self.explicit_zero_width(code))
+    }
+
+    /// Whether `code`'s advance is explicitly zero (`Some(0.0)`), not merely missing: a `/Widths`
+    /// entry, or for a composite font a `/W` entry or an explicit `/DW` of zero.
+    fn explicit_zero_width(&self, code: u32) -> bool {
+        if self.composite {
+            let cid = self.cid(code);
+            // CID 0 is `.notdef`, whatever ToUnicode says (#3223): the mark exemption must not
+            // give it a way back in through a zero /DW.
+            if cid == 0 {
+                return false;
+            }
+            let w = self.cid_widths.get(&cid).copied().or_else(|| self.cid_ranges.find(cid).map(|r| r.2));
+            return w.map_or(self.explicit_default && self.default == 0.0, |w| w == 0.0);
+        }
+        code.checked_sub(self.first).and_then(|i| self.widths.get(i as usize)).is_some_and(|w| *w == 0.0)
     }
 
     /// The bytes that show `text` in this font, or `None` if some character has no code or
@@ -940,6 +967,12 @@ fn only_char(s: &str) -> Option<char> {
     let mut chars = s.chars();
     let c = chars.next()?;
     chars.next().is_none().then_some(c)
+}
+
+/// Whether `c` is a Thai combining mark, which draws over the consonant before it and so has no
+/// advance of its own. SARA AM (U+0E33) is a spacing vowel and keeps its advance, so it is not one.
+fn is_thai_mark(c: char) -> bool {
+    matches!(u32::from(c), 0x0E31 | 0x0E34..=0x0E3A | 0x0E47..=0x0E4E)
 }
 
 /// Keeps the lowest code found for `c`.
@@ -1560,5 +1593,66 @@ mod encoding_tests {
             assert!(embedded_sfnt_within(&doc, &font, &mut budget).is_none());
         }
         assert_eq!(budget.remaining(), 0);
+    }
+
+    /// A simple font shaped like a Thai page font: `/Widths` gives a combining mark an explicit zero
+    /// advance, and `/ToUnicode` says what each code draws.
+    fn thai_font(first: i64, widths: Vec<i64>, to_unicode: &str) -> Metrics {
+        let mut doc = Document::new_empty();
+        let mut d = Dict::new();
+        d.set(b"Type".to_vec(), Object::name("Font"));
+        d.set(b"Subtype".to_vec(), Object::name("Type1"));
+        d.set(b"BaseFont".to_vec(), Object::name("ThaiPageFont"));
+        d.set(b"FirstChar".to_vec(), Object::Int(first));
+        d.set(b"Widths".to_vec(), Object::Array(widths.into_iter().map(Object::Int).collect()));
+        let tu = doc.add(Object::Stream(pdfcraft_cos::Stream::flate(Dict::new(), to_unicode.as_bytes())));
+        d.set(b"ToUnicode".to_vec(), tu);
+        Metrics::from_dict(&doc, &d)
+    }
+
+    /// Code 1 น, 2 the mark ้, 3 SARA AM, 4 `x`; codes 2 and 4 have zero width.
+    const THAI_CMAP: &str = "4 beginbfchar <0001> <0E19> <0002> <0E49> <0003> <0E33> <0004> <0078> endbfchar";
+
+    #[test]
+    fn thai_marks_are_the_combining_marks_only() {
+        for c in ['\u{e31}', '\u{e34}', '\u{e3a}', '\u{e47}', '\u{e4e}'] {
+            assert!(is_thai_mark(c), "{c:?}");
+        }
+        for c in ['\u{e01}', '\u{e32}', '\u{e33}', '\u{e3b}', '\u{e46}', '\u{e4f}', 'a'] {
+            assert!(!is_thai_mark(c), "{c:?}");
+        }
+    }
+
+    /// The page's own Thai font lists a combining mark with a zero advance. It must still encode, or
+    /// edited Thai text falls back to the Type3 replacement font instead of the page's face.
+    #[test]
+    fn a_thai_mark_with_zero_advance_encodes_in_the_page_font() {
+        let m = thai_font(1, vec![500, 0, 500, 0], THAI_CMAP);
+        assert_eq!(m.width(1), 0.5);
+        assert_eq!(m.width(2), 0.0, "the mark has no advance");
+        assert_eq!(m.width(3), 0.5, "SARA AM is a spacing vowel");
+        assert_eq!(m.encode("น้ำ").as_deref(), Some(&b"\x01\x02\x03"[..]), "consonant, mark, SARA AM");
+        assert!(m.text_of(2).is_some_and(|t| t == "\u{e49}"));
+    }
+
+    #[test]
+    fn only_thai_marks_take_the_zero_width_route() {
+        let m = thai_font(1, vec![500, 0, 500, 0], THAI_CMAP);
+        // A non-Thai character at zero width still has no glyph to draw it.
+        assert_eq!(m.width(4), 0.0);
+        assert_eq!(m.encode("x"), None);
+        // SARA AM keeps its advance, so it is not a mark and does not need this route.
+        assert!(!is_thai_mark('\u{e33}'));
+
+        // A mark the ToUnicode does not mention says nothing about what the code draws.
+        let m = thai_font(1, vec![500, 0, 500, 0], "2 beginbfchar <0001> <0E19> <0003> <0E33> endbfchar");
+        assert_eq!(m.encode("น้ำ"), None);
+    }
+
+    #[test]
+    fn a_missing_width_entry_is_not_an_explicit_zero() {
+        // A subset that dropped the mark has no entry for it at all: keep the Type3 fallback.
+        let m = thai_font(1, vec![500], "1 beginbfchar <0002> <0E49> endbfchar");
+        assert_eq!(m.encode("้"), None);
     }
 }

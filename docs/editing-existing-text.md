@@ -65,15 +65,19 @@ stays with its base. Latin words inside Thai text keep their measured widths. An
 clause is rewrapped the same way, on the edited-block path described below; the generic
 `linebreak` path is not involved.
 
-Edit text replaces existing text with Thai even when the page's own font has no Thai glyphs. The
-Type 3 fallback prefers `document_thai_font()` for U+0E00–U+0E7F text and names the generated
-font `/PCThai`; each mark's GPOS offset is baked into its CharProc and the mark is given a zero
-advance, so it sits over its base rather than after it. A build without the Thai face reports
-that instead of failing on a missing glyph. Thai combining marks join their base for cursor
-movement, selection and deletion (`is_thai_mark`, and SARA AM joins the preceding cluster), and an
-edited Thai clause rewraps at dictionary word boundaries. Two limits remain: a mark reused on
-several bases keeps the first occurrence's baked offset, because fallback glyphs are keyed per
-character; and the mixed-style styled-region path still breaks Thai only at spaces.
+Edit text replaces existing text with Thai even when the page's own font has no Thai glyphs. When
+the page's own font carries the text, it is reused: its `/ToUnicode` names each code and its widths
+give a combining mark an explicit zero, so an edited Thai run keeps that font, marks included, and
+writes the same codes back. A width that is missing rather than explicitly zero still takes the
+fallback. That Type 3 fallback serves only characters the page's font lacks: it prefers
+`document_thai_font()` for U+0E00–U+0E7F text and names the generated font `/PCThai`; each mark's
+GPOS offset is baked into its CharProc and the mark is given a zero advance, so it sits over its
+base rather than after it. A build without the Thai face reports that instead of failing on a
+missing glyph. Thai combining marks join their base for cursor movement, selection and deletion
+(`is_thai_mark`, and SARA AM joins the preceding cluster), and an edited Thai clause rewraps at
+dictionary word boundaries. Two limits remain: on the fallback path, a mark reused on several bases
+keeps the first occurrence's baked offset, because fallback glyphs are keyed per character; and the
+mixed-style styled-region path still breaks Thai only at spaces.
 
 Select text within the editor before changing size, colour, font, underline or spacing to
 format that selection. Automation supports up to 1024 disjoint UTF-8 byte ranges with the
