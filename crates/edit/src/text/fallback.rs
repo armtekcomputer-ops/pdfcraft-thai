@@ -415,43 +415,15 @@ pub(crate) fn type3_faces(text: &str, family: crate::added::Family, bold: bool) 
 /// keeps its advance.
 ///
 /// [`thai_char_offsets`]: pdfcraft_fonts::thai_char_offsets
-fn thai_mark_shifts(text: &str, face: &CraftFont) -> HashMap<char, [f64; 2]> {
+fn thai_mark_shifts(text: &str, _face: &CraftFont) -> HashMap<char, [f64; 2]> {
+    // `thai_char_offsets` gives the shaper's pen-relative offsets, which is exactly what a
+    // CharProc needs: the mark's outline is drawn at the pen, and the pen has already advanced
+    // past its base. One glyph is shared by every use of a character, so the first position wins.
     let mut shifts = HashMap::new();
-    if !text.chars().any(is_thai_char) {
-        return shifts;
-    }
-    let offsets: Vec<(char, [f64; 2])> = pdfcraft_fonts::thai_char_offsets(text)
-        .into_iter()
-        .filter(|(ch, offset)| crate::bidi::is_thai_mark(*ch) && (offset[0].abs() > 1e-9 || offset[1].abs() > 1e-9))
-        .collect();
-    if offsets.is_empty() {
-        return shifts;
-    }
-    // The pen (em) at each character within its shaped cluster: a base advances by its own width,
-    // a mark does not. The clusters are the same ones `thai_char_offsets` reports from.
-    let Ok(clusters) = pdfcraft_fonts::shape_thai(text) else { return shifts };
-    let mut pens: Vec<(char, [f64; 2])> = Vec::new();
-    for cluster in clusters {
-        let mut pen = [0.0f64, 0.0];
-        for ch in cluster.text.chars() {
-            pens.push((ch, pen));
-            if let Ok(glyph) = japanese_glyph_from(face, ch) {
-                pen[0] += glyph.width;
-            }
+    for (ch, offset) in pdfcraft_fonts::thai_char_offsets(text) {
+        if crate::bidi::is_thai_mark(ch) {
+            shifts.entry(ch).or_insert(offset);
         }
-    }
-    let mut next = 0usize;
-    for (ch, at) in offsets {
-        let Some(found) = pens.iter().skip(next).position(|(c, _)| *c == ch) else { continue };
-        let index = next.saturating_add(found);
-        let Some((_, pen)) = pens.get(index) else { continue };
-        let shift = [at[0] - pen[0], at[1] - pen[1]];
-        if shift.iter().all(|v| v.is_finite()) {
-            // One glyph per unique character: a mark used on several bases keeps the first
-            // occurrence's position (the same limit the shaped Add Text plan has).
-            shifts.entry(ch).or_insert(shift);
-        }
-        next = index.saturating_add(1);
     }
     shifts
 }

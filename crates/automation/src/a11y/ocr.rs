@@ -12,10 +12,10 @@ impl Automation {
             settings.dpi = d.clamp(72.0, 600.0) as f32;
         }
         if let Some(l) = a.opt_str("language")? {
-            if !pdfcraft_engine::ocr::LANGUAGES.iter().any(|x| x.0 == l) {
+            if !pdfcraft_engine::ocr::OFFERED_LANGUAGES.iter().any(|x| x.0.eq_ignore_ascii_case(l)) {
                 return Err(ToolError::InvalidArgs(format!(
                     "unsupported language {l:?} (supported: {})",
-                    pdfcraft_engine::ocr::LANGUAGES.iter().map(|(c, _)| *c).collect::<Vec<_>>().join(", ")
+                    pdfcraft_engine::ocr::OFFERED_LANGUAGES.iter().map(|(c, _)| *c).collect::<Vec<_>>().join(", ")
                 )));
             }
             settings.language = l.into();

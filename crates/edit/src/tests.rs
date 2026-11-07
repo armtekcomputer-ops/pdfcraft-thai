@@ -11025,9 +11025,8 @@ fn a_thai_mark_in_the_fallback_has_no_advance_and_a_shifted_outline() {
 
     // Compare its ink box against the face's own outline: it moved by the mark's GPOS offset.
     let raw = pdfcraft_fonts::japanese_glyph_from(face, '\u{0E39}').expect("the mark's outline");
-    let base = pdfcraft_fonts::japanese_glyph_from(face, 'ป').expect("the base's outline");
-    let at = pdfcraft_fonts::thai_char_offsets(word).into_iter().find(|(c, _)| *c == '\u{0E39}').expect("the shaped run places the mark").1;
-    let shift = at[0] - base.width;
+    // `thai_char_offsets` is pen-relative (the pen has already advanced past the base).
+    let shift = pdfcraft_fonts::thai_char_offsets(word).into_iter().find(|(c, _)| *c == '\u{0E39}').expect("the shaped run places the mark").1[0];
     assert!((-0.05..=-0.005).contains(&shift), "the fixture needs a visible GPOS shift, got {shift}");
     let left = d1[2].parse::<f64>().unwrap();
     let expected = ((raw.bbox[0] + shift) * 1000.0).floor();

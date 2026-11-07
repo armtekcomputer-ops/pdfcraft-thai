@@ -144,19 +144,45 @@ pub fn arabic_glyph(id: u32) -> Result<GlyphOutline, GlyphError> {
     shaped_glyph(ShapedScript::Arabic, id)
 }
 
-/// Per-character offsets (em units) that place Thai marks over their base, read from the same
-/// Harfrust run the shaped Add Text path draws: a base letter has no offset and is omitted.
-/// Used by the OCR text layer, whose per-character codes cannot carry a mark position.
+/// Per-character offsets (em units) **relative to the pen** that place Thai marks over their
+/// base, read from the same Harfrust run the shaped Add Text path draws: a character the run
+/// places at the pen is omitted. Used by the OCR text layer and the Edit Text fallback, whose
+/// per-character codes cannot carry a mark position.
+///
+/// These are the shaper's own `x_offset`/`y_offset`, not the position within the cluster: a
+/// caller that already advances its pen past the base must add only the offset, or the mark
+/// lands a whole base width to the right (which turned recognised Thai into scrambled glyphs).
 pub fn thai_char_offsets(text: &str) -> Vec<(char, [f64; 2])> {
-    let Ok(clusters) = shape_thai(text) else { return Vec::new() };
+    let Some((font, data)) = face(ShapedScript::Thai) else { return Vec::new() };
+    let shaper = data.shaper(font).build();
+    let scale = 1.0 / f64::from(shaper.units_per_em().max(1));
+    let mut buffer = UnicodeBuffer::new();
+    buffer.push_str(text);
+    buffer.set_direction(Direction::LeftToRight);
+    buffer.set_script(script::THAI);
+    // The same cluster grouping `shape_thai` uses, so the characters and offsets line up.
+    buffer.set_cluster_level(BufferClusterLevel::MonotoneGraphemes);
+    let shaped = shaper.shape(buffer, ShapeOptions::new());
+    let mut starts: Vec<usize> = shaped.glyph_infos().iter().map(|g| g.cluster as usize).collect();
+    starts.sort_unstable();
+    starts.dedup();
     let mut out = Vec::new();
-    for cluster in clusters {
-        let mut glyphs = cluster.glyphs.iter();
-        for ch in cluster.text.chars() {
-            let Some((_, off)) = glyphs.next() else { break };
-            if off[0].abs() > 1e-9 || off[1].abs() > 1e-9 {
-                out.push((ch, *off));
-            }
+    let mut cluster_start = usize::MAX;
+    let mut char_at = 0usize;
+    let mut chars: Vec<char> = Vec::new();
+    for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
+        let start = info.cluster as usize;
+        if start != cluster_start {
+            cluster_start = start;
+            let end = starts.get(starts.partition_point(|s| *s <= start)).copied().unwrap_or(text.len());
+            chars = text.get(start..end).unwrap_or_default().chars().collect();
+            char_at = 0;
+        }
+        let off = [f64::from(pos.x_offset) * scale, f64::from(pos.y_offset) * scale];
+        let Some(ch) = chars.get(char_at).copied() else { continue };
+        char_at += 1;
+        if off[0].abs() > 1e-9 || off[1].abs() > 1e-9 {
+            out.push((ch, off));
         }
     }
     out

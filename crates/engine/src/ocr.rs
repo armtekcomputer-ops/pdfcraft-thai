@@ -713,6 +713,49 @@ fn editable_word(w: &PlacedWord, info: &PageInfo) -> PlacedWord {
     }
 }
 
+/// One line's words with Thai clusters merged: Tesseract reports every shaped cluster as its
+/// own word, and laying each one out against its own box stretched marks and vowels into
+/// neighbouring letters (the visible output read as scrambled glyphs). Adjacent clusters whose
+/// boxes sit flush belong to one run and become one word, with the union of their boxes.
+fn merged_line_words(line: &pdfcraft_ocr::Line) -> Vec<pdfcraft_ocr::Word> {
+    // The dictionary word ends in the line's text: clusters are merged only up to one of them,
+    // so a line does not collapse into a single box and review still sees words.
+    let joined = line.text();
+    let mut ends = std::collections::HashSet::new();
+    let mut at = 0usize;
+    for word in pdfcraft_ocr::segment::words(&joined) {
+        at += word.chars().count();
+        ends.insert(at);
+    }
+    let mut out: Vec<pdfcraft_ocr::Word> = Vec::with_capacity(line.words.len());
+    let mut chars = 0usize;
+    for word in &line.words {
+        let len = word.text.chars().count();
+        if let Some(prev) = out.last_mut() {
+            let gap = word.rect[0] - prev.rect[2];
+            let height = (prev.rect[3] - prev.rect[1]).max(word.rect[3] - word.rect[1]);
+            let flush = pdfcraft_ocr::segment::joins_without_space(&prev.text, &word.text, gap, height);
+            // Stay inside the current dictionary word: a boundary right after the previous
+            // cluster starts a new word even when the boxes touch.
+            let crosses_word = ends.contains(&chars);
+            if flush && !crosses_word && len > 0 {
+                prev.text.push_str(&word.text);
+                prev.rect =
+                    [prev.rect[0].min(word.rect[0]), prev.rect[1].min(word.rect[1]), prev.rect[2].max(word.rect[2]), prev.rect[3].max(word.rect[3])];
+                prev.confidence = match (prev.confidence, word.confidence) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+                chars = chars.saturating_add(len);
+                continue;
+            }
+        }
+        out.push(word.clone());
+        chars = chars.saturating_add(len);
+    }
+    out
+}
+
 impl OcrJob {
     /// The pixels-per-point this job renders `page` at (the real render dpi is this times 72).
     /// The Verify screen uses it to express a region picked on its own preview in the pixels
@@ -841,7 +884,7 @@ impl OcrJob {
             };
             // Validate recognition geometry and compare against existing text in view space,
             // undoing preprocessing and region offsets before testing overlap.
-            let (fresh, already): (Vec<_>, Vec<_>) = outcome.lines.iter().flat_map(|l| &l.words).filter(|w| box_writable(w)).partition(|w| {
+            let (fresh, already): (Vec<_>, Vec<_>) = outcome.lines.iter().flat_map(merged_line_words).filter(box_writable).partition(|w| {
                 let [l, t, r, b] = w.rect;
                 let bounds = [(l, t), (r, t), (r, b), (l, b)].into_iter().fold(
                     [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
@@ -858,7 +901,7 @@ impl OcrJob {
                 );
                 covered(bounds, &existing) < ALREADY_ON_PAGE
             });
-            let words = fresh.into_iter().map(|w| PlacedWord::place(w, to_user)).collect::<Vec<_>>();
+            let words = fresh.into_iter().map(|w| PlacedWord::place(&w, to_user)).collect::<Vec<_>>();
             let mut notes = outcome.notes;
             // Only visible editable output needs display glyphs. Searchable output preserves
             // every Unicode character with empty Type3 programs and ToUnicode maps.
@@ -1520,6 +1563,34 @@ mod tests {
             Ok(r) => assert_eq!(r.primary.id(), "ocrs"),
             Err(e) => assert!(e.contains("models"), "{e}"),
         }
+    }
+
+    /// Tesseract reports each Thai shaped cluster as a word. Laying each one out against its
+    /// own box stretched marks and vowels into their neighbours, so adjacent flush clusters
+    /// become one word with the union of their boxes.
+    #[test]
+    fn thai_clusters_merge_into_one_word() {
+        use pdfcraft_ocr::{Line, Word};
+        let line = Line {
+            words: vec![Word::new("สวัส", [0.0, 0.0, 40.0, 20.0], "tesseract"), Word::new("ดี", [41.0, 0.0, 60.0, 20.0], "tesseract")]
+        };
+        let merged = merged_line_words(&line);
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].text, "สวัสดี");
+        assert_eq!(merged[0].rect, [0.0, 0.0, 60.0, 20.0]);
+        // A dictionary boundary between two words is kept even when the boxes touch.
+        let two = Line {
+            words: vec![Word::new("สวัสดี", [0.0, 0.0, 80.0, 20.0], "tesseract"), Word::new("ครับ", [81.0, 0.0, 120.0, 20.0], "tesseract")],
+        };
+        assert_eq!(merged_line_words(&two).len(), 2, "a dictionary boundary is not glued");
+        // A real space in the scan keeps its two words.
+        let spaced = Line {
+            words: vec![Word::new("ภาษา", [0.0, 0.0, 40.0, 20.0], "tesseract"), Word::new("ไทย", [70.0, 0.0, 100.0, 20.0], "tesseract")],
+        };
+        assert_eq!(merged_line_words(&spaced).len(), 2);
+        // Latin words are never glued, whatever their boxes.
+        let latin = Line { words: vec![Word::new("hello", [0.0, 0.0, 40.0, 20.0], "ocrs"), Word::new("world", [41.0, 0.0, 80.0, 20.0], "ocrs")] };
+        assert_eq!(merged_line_words(&latin).len(), 2);
     }
 
     /// Thai is offered, but the built-in ocrs models read only the Latin alphabet: a Thai job
