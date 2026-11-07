@@ -7,6 +7,8 @@ plan/
 .DS_Store
 /fuzz-out
 /assets/models
+# The knowledge graph built by `graphify` (local, regenerable with `graphify update .`).
+graphify-out/
 # A craft-fonts checkout used as the optional CRAFT_FONTS_DIR build input (CI and releases put it here).
 /craft-fonts
 .claude/
