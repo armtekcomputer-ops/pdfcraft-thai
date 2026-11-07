@@ -1,5 +1,6 @@
 # Localization parity
 
+> **Last reviewed:** 2026-11-03 · **Last updated:** 2026-11-07 · **Change:** minor (Thai (`th`) added: `locales/th/pdfcraft.tsv` has 3,300 entries (3,313 lines including header and comments), with no empty translation; clean-room and AI-assisted, not reviewed by a native speaker; no translated help)
 > **Last reviewed:** 2026-11-03 · **Last updated:** 2026-11-03 · **Change:** minor (Turkish: 2,867 entries, 0 missing in `cargo xtask i18n-report` on 2026-11-03; AI-assisted)
 > **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (Persian (`fa`, 2,785 entries) added right-to-left like Arabic and Kurdish; Arabic current state corrected: catalogs stay logical, RTL labels take an explicit direction and stock chrome mirrors; native/browser RTL input, IME and complex workflows remain unqualified. Native release Hans face via LXGW WenKai Lite; release-pinned craft-fonts still has no Telugu face. Current union 2,798 keys. Scores and estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 
@@ -81,15 +82,19 @@ help/docs polish (catalog and script work are already done), not missing UI stri
 | Romanian | `ro` | 2,798 entries (every current key) | partial; AI-assisted, not yet reviewed line by line by a native speaker | no |
 | Norwegian Bokmål | `nb` | 2,707 entries | partial; native-speaker terminology review by the contributor ([#1836](https://github.com/storytold/pdfcraft/pull/1836)), not yet line by line | yes |
 | Persian | `fa` | 2,785 entries (all but 13 keys of the current 2,798-key union) | partial; AI-assisted, not yet reviewed line by line by a native speaker | no |
+| Thai | `th` | 3,300 entries (3,313 lines including header and comments); no empty translation | partial; clean-room and AI-assisted, not reviewed by a native speaker; no translated help | no |
 
-**20 other languages** ship (34 catalogs plus English = **35** interface languages in Preferences).
+**21 other languages** ship (34 catalogs plus English = **35** interface languages in Preferences).
 The entry counts without percentages are as of 2026-10-25; they are not percentages of the older 2,143-key snapshot above. Their presence does not imply a detailed linguistic or runtime review.
 Acrobat languages PdfCraft lacks: Danish, Dutch, Swedish, Hebrew. Vietnamese is shipped here but not by Acrobat.
+
+Thai needs no new face: the craft-fonts `Thai` face (Noto Sans Thai) already ships, and the web build embeds it; Thai text shaping and dictionary line breaking in added text are covered in [editing-existing-text.md](editing-existing-text.md). What it still lacks is native review and help: the catalog is clean-room and AI-assisted, and no translated help exists.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-07 | minor | Added Thai (`th`): `locales/th/pdfcraft.tsv` has 3,300 entries (3,313 lines including header and comments), with no empty translation; clean-room and AI-assisted, not native-reviewed; no translated help. The craft-fonts `Thai` face already ships, so no new font is needed |
 | 2026-10-25 | minor | Arabic current state corrected: catalogs stay logical, Arabic/Kurdish labels take an explicit RTL direction, and stock chrome mirrors; native/browser RTL input, IME and complex workflows remain unqualified. Native Simplified Chinese uses LXGW WenKai Lite; the web build still has no Hans face and the release-pinned craft-fonts still has no Telugu face. Scores and estimates unchanged |
 | 2026-10-25 | minor | Added Persian (`fa`, 2,785 entries, all but 13 of the current 2,798-key union); right-to-left like Arabic and Kurdish, with logical entries reordered by egui 0.37's epaint; AI-assisted, not yet native-reviewed |
 | 2026-10-21 | minor | Brazilian Portuguese (`pt-br`) now covers all 2,674 distinct keys in the current catalog union; no help or engine/OS error-detail localization; twelve-language mean still rounds to ≈ 68% |

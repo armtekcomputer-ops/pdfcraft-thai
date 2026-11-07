@@ -1176,6 +1176,37 @@ fn hindi_and_korean_are_registered_and_persist() {
 }
 
 #[test]
+fn thai_is_offered_and_named() {
+    needs_catalogs!();
+    let th = Lang::from_code("th").expect("th registered");
+    assert_eq!(th.english_name(), "Thai");
+    assert!(!th.rtl(), "Thai is written left to right");
+    assert!(Lang::for_picker().iter().any(|l| l.code() == "th"), "the picker offers Thai");
+}
+
+#[test]
+fn thai_locales_resolve_to_thai() {
+    needs_catalogs!();
+    let th = Lang::from_code("th").expect("th registered");
+    for tag in ["th", "th-TH", "th_TH.UTF-8", "TH-th"] {
+        assert_eq!(lang_from_tag(tag), Some(th), "{tag}");
+    }
+    assert_eq!(first_supported("th-TH\r\nen-US"), Some(th));
+}
+
+#[test]
+fn thai_catalog_loads() {
+    needs_catalogs!();
+    let th = Lang::from_code("th").expect("th registered");
+    assert_eq!(th.name(), "ไทย");
+    assert_eq!(tr(th, "Cancel"), "ยกเลิก");
+    assert_eq!(tr(th, "File"), "ไฟล์");
+    assert_eq!(tr(th, "Save"), "บันทึก");
+    // User text passes through untouched.
+    assert_eq!(tr(th, "รายงาน {n}.pdf"), "รายงาน {n}.pdf");
+}
+
+#[test]
 fn bulgarian_is_registered() {
     needs_catalogs!();
     let bg = Lang::from_code("bg").expect("bg registered");
