@@ -55,13 +55,24 @@ pub struct OcrDraft {
     pub output_folder: Option<String>,
 }
 
+/// The language a fresh Recognize Text dialog starts in: the interface language when the
+/// recognisers offer it, else English. A Thai interface therefore reads a Thai scan as Thai
+/// instead of quietly running the Latin-only models (which returned Latin gibberish).
+fn default_language(interface: &str) -> String {
+    let code = interface.trim().to_ascii_lowercase();
+    match pdfcraft_engine::ocr::OFFERED_LANGUAGES.iter().find(|(c, _)| *c == code) {
+        Some((c, _)) => (*c).to_string(),
+        None => "en".into(),
+    }
+}
+
 impl Default for OcrDraft {
     fn default() -> Self {
         OcrDraft {
             pages: OcrPages::All,
             from: 1,
             to: 1,
-            language: "en".into(),
+            language: default_language(crate::i18n::current().code()),
             dpi: 300,
             text_pages: false,
             engine: EngineChoice::default(),
@@ -1221,6 +1232,17 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&english).expect("fixture"), "english\n", "English's file is untouched");
         assert!(!v.add_to_dictionary("extra", "en"), "another language's dictionary is refused");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Thai interface starts the dialog on Thai: the Latin-only models read Thai shapes as
+    /// Latin gibberish, which is what put a Thai scan's OCR layer full of "SMnna ?il?ten".
+    #[test]
+    fn the_dialog_starts_in_the_interface_language_when_ocr_offers_it() {
+        assert_eq!(default_language("th"), "th");
+        assert_eq!(default_language("TH"), "th");
+        assert_eq!(default_language("ja"), "ja");
+        assert_eq!(default_language("sv"), "en", "an interface language OCR does not offer falls back to English");
+        let _ = OcrDraft::default();
     }
 
     /// "Automatic" saved without a strategy reads the way Automatic reads by default (the
