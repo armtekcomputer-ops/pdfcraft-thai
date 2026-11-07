@@ -217,7 +217,21 @@ pub struct OcrPage {
 
 impl OcrPage {
     pub fn text(&self) -> String {
-        self.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+        let mut out = String::new();
+        for (i, word) in self.words.iter().enumerate() {
+            if let Some(prev) = i.checked_sub(1).map(|p| &self.words[p]) {
+                // The placed word runs from its origin along `across`; the gap to the next one
+                // is measured in user space along the same line, with `up` as the line height.
+                let end = [prev.origin[0] + prev.across[0], prev.origin[1] + prev.across[1]];
+                let gap = ((word.origin[0] - end[0]) as f32).abs();
+                let height = (prev.up[0].hypot(prev.up[1]) as f32).max(word.up[0].hypot(word.up[1]) as f32);
+                if !pdfcraft_ocr::segment::joins_without_space(&prev.text, &word.text, gap, height) {
+                    out.push(' ');
+                }
+            }
+            out.push_str(&word.text);
+        }
+        out
     }
 
     /// Mean of the confidences the page's words report (`None` when none do).

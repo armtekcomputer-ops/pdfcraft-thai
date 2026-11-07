@@ -25,6 +25,7 @@ pub mod confidence;
 pub mod merge;
 mod ocrs;
 pub mod preprocess;
+pub mod segment;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tesseract;
 
@@ -198,17 +199,32 @@ pub struct Line {
 }
 
 impl Line {
+    /// The line as one string. Latin words are separated by the space the recogniser dropped;
+    /// Thai clusters are not: Thai writes words without spaces, Tesseract reports each cluster
+    /// as a word, and a space between them would break copy, search and the dictionary. A wide
+    /// gap between two Thai words (a real space in the scan) still becomes one.
     pub fn text(&self) -> String {
-        self.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+        let mut out = String::new();
+        for (i, word) in self.words.iter().enumerate() {
+            if let Some(prev) = i.checked_sub(1).map(|p| &self.words[p]) {
+                let gap = word.rect[0] - prev.rect[2];
+                let height = (prev.rect[3] - prev.rect[1]).max(word.rect[3] - word.rect[1]);
+                if !segment::joins_without_space(&prev.text, &word.text, gap, height) {
+                    out.push(' ');
+                }
+            }
+            out.push_str(&word.text);
+        }
+        out
     }
 }
 
 /// What a recogniser needs to know beyond the pixels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecognizeOptions {
-    /// Language code from [`LANGUAGES`] (`"en"`, `"de"`, …). Engines map it to their own codes
-    /// (Tesseract: `tesseract::language_code`, allow-listed before anything reaches a process);
-    /// unknown codes fall back to the engine's default.
+    /// Language code from [`OFFERED_LANGUAGES`] (`"en"`, `"de"`, …). Engines map it to their own
+    /// codes (Tesseract: `tesseract::language_code`, allow-listed before anything reaches a
+    /// process); unknown codes fall back to the engine's default.
     pub language: String,
 }
 
