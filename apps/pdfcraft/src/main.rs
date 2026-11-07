@@ -51,6 +51,11 @@ mod windows_manifest;
 /// Freedesktop app id: the `.desktop` file name and the hicolor icon name.
 const APP_ID: &str = "ai.storyteller.pdfcraft";
 
+/// Folder name for this build's preferences, recents, recovery and logs. Deliberately not
+/// `pdfcraft`: a Thai build installed beside PdfCraft keeps its own recent-files list and
+/// settings instead of sharing (and migrating) the other app's.
+const PRODUCT_DIR: &str = "pdfcraft-thai";
+
 /// The app icon (assets/app-icon/README.md). macOS gets the version on Apple's icon grid, with a
 /// transparent margin; Windows and Linux get the full-bleed tile.
 #[cfg(target_os = "macos")]
@@ -92,17 +97,19 @@ const LEGACY_STORAGE_KEY: &str = "printcraft";
 /// it is `PdfCraftData` beside the executable (#157). XDG desktops use the configuration base;
 /// other platforms retain eframe's PdfCraft folder. Logs and recovery stay in the data folder.
 fn settings_dir() -> Option<std::path::PathBuf> {
-    let legacy = eframe::storage_dir("PdfCraft");
+    let legacy = eframe::storage_dir(PRODUCT_DIR);
     match settings::directory(
         cfg!(all(unix, not(target_os = "macos"))),
         pdfcraft_ui_egui::portable::data_dir(),
-        legacy.clone(),
+        // No migration source: this build starts with its own preferences rather than importing
+        // another PdfCraft's recents and settings.
+        None,
         std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from),
         std::env::home_dir(),
     ) {
         Ok(dir) => dir,
         Err(e) => {
-            log::warn!("could not migrate preferences to the XDG configuration folder; using the original location: {e}");
+            log::warn!("could not create the configuration folder; using the data folder: {e}");
             legacy
         }
     }
@@ -116,11 +123,11 @@ fn migrate_legacy_folders() {
     if pdfcraft_ui_egui::portable::data_dir().is_some() {
         return;
     }
-    let mut moves = vec![(eframe::storage_dir("PrintCraft"), eframe::storage_dir("PdfCraft"))];
+    let mut moves = vec![(eframe::storage_dir("PrintCraft"), eframe::storage_dir(PRODUCT_DIR))];
     // Recovery lives in the settings folder except on Windows, where it is under %LOCALAPPDATA%.
     if cfg!(windows) {
         let local = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
-        moves.push((local.as_ref().map(|d| d.join("PrintCraft")), local.map(|d| d.join("PdfCraft"))));
+        moves.push((local.as_ref().map(|d| d.join("PrintCraft")), local.map(|d| d.join(PRODUCT_DIR))));
     }
     for (old, new) in moves {
         let (Some(old), Some(new)) = (old, new) else { continue };
@@ -240,7 +247,7 @@ fn main() -> eframe::Result {
     // no file behind) and after the PrintCraft migration (which a fresh folder would block).
     // Records logged until now are written to it first.
     if let (Some(logger), Some(dir)) =
-        (logger, pdfcraft_ui_egui::portable::data_dir().map(std::path::Path::to_path_buf).or_else(|| eframe::storage_dir("PdfCraft")))
+        (logger, pdfcraft_ui_egui::portable::data_dir().map(std::path::Path::to_path_buf).or_else(|| eframe::storage_dir(PRODUCT_DIR)))
     {
         match logger.attach_dir(&dir.join("logs")) {
             Ok(path) => log::info!("PdfCraft {}, log file {}", pdfcraft_engine::build_info::version(), path.display()),
@@ -331,7 +338,7 @@ fn retry_with_gl(choice: RendererChoice, app_started: bool) -> bool {
 /// The window and renderer settings for one run.
 fn native_options(integrated: bool, app_frame: bool, renderer: eframe::Renderer) -> eframe::NativeOptions {
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("PdfCraft")
+        .with_title("PdfCraft Thai")
         .with_inner_size([1440.0, 920.0])
         .with_min_inner_size([820.0, 520.0])
         .with_drag_and_drop(true)

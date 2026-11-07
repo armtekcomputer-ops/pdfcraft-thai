@@ -20,7 +20,7 @@ pub fn directory(
     }
     // XDG requires absolute environment paths; empty and relative overrides are ignored.
     let preferred = config_home.filter(|p| p.is_absolute()).or_else(|| home.filter(|p| p.is_absolute()).map(|p| p.join(".config")));
-    let Some(preferred) = preferred.map(|p| p.join("pdfcraft")) else { return Ok(legacy) };
+    let Some(preferred) = preferred.map(|p| p.join("pdfcraft-thai")) else { return Ok(legacy) };
     let target = preferred.join("app.ron");
     if std::fs::symlink_metadata(&target).is_ok() {
         return Ok(Some(preferred));
@@ -93,7 +93,7 @@ mod tests {
         let fixture = Fixture::new();
         let home = fixture.0.join("home");
         let data = home.join(".local/share/pdfcraft");
-        assert_eq!(directory(true, None, Some(data), None, Some(home.clone())).unwrap(), Some(home.join(".config/pdfcraft")));
+        assert_eq!(directory(true, None, Some(data), None, Some(home.clone())).unwrap(), Some(home.join(".config/pdfcraft-thai")));
     }
 
     struct Fixture(PathBuf);
@@ -116,9 +116,9 @@ mod tests {
         let f = Fixture::new();
         let home = f.0.join("home");
         let config = f.0.join("custom-config");
-        assert_eq!(directory(true, None, None, Some(config.clone()), Some(home.clone())).unwrap(), Some(config.join("pdfcraft")));
+        assert_eq!(directory(true, None, None, Some(config.clone()), Some(home.clone())).unwrap(), Some(config.join("pdfcraft-thai")));
         for invalid in [PathBuf::new(), PathBuf::from("relative")] {
-            assert_eq!(directory(true, None, None, Some(invalid), Some(home.clone())).unwrap(), Some(home.join(".config/pdfcraft")));
+            assert_eq!(directory(true, None, None, Some(invalid), Some(home.clone())).unwrap(), Some(home.join(".config/pdfcraft-thai")));
         }
         assert_eq!(directory(true, None, Some(f.0.clone()), None, None).unwrap(), Some(f.0.clone()));
     }
@@ -133,7 +133,7 @@ mod tests {
         std::fs::write(data.join("recovery/unsaved.pdf"), b"UNSAVED").unwrap();
         std::fs::write(data.join("digital-id.p12"), b"KEY").unwrap();
         let selected = directory(true, None, Some(data.clone()), Some(config.clone()), None).unwrap().unwrap();
-        assert_eq!(selected, config.join("pdfcraft"));
+        assert_eq!(selected, config.join("pdfcraft-thai"));
         assert_eq!(std::fs::read(selected.join("app.ron")).unwrap(), std::fs::read(data.join("app.ron")).unwrap());
         assert_eq!(std::fs::read(data.join("recovery/unsaved.pdf")).unwrap(), b"UNSAVED");
         assert_eq!(std::fs::read(data.join("digital-id.p12")).unwrap(), b"KEY");

@@ -119,3 +119,17 @@ pub(crate) fn dialog(app: &mut PdfCraftApp, ctx: &egui::Context) {
     #[cfg(target_arch = "wasm32")]
     let _ = (app, ctx);
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    /// A Thai build must not offer to "update" to upstream PdfCraft: both the check and the
+    /// releases link name this fork.
+    #[test]
+    fn updates_come_from_this_forks_releases() {
+        assert_eq!(crate::UPDATE_APP.repo, "armtekcomputer-ops/pdfcraft-thai");
+        assert_eq!(RELEASES_PAGE, "https://github.com/armtekcomputer-ops/pdfcraft-thai/releases");
+        assert_eq!(crate::UPDATE_APP.releases_url(), RELEASES_PAGE);
+    }
+}
