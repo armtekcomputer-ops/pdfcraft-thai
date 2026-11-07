@@ -25,7 +25,13 @@ let layer = visible_text_layer(&placed, &plan);          // visible text: the ed
   beside the executable — see ATTRIBUTION.toml), and — off the web build —
   `tesseract::TesseractCli`, which drives an installed `tesseract` binary as an external
   process: never linked, bundled or downloaded. Implementations are shared across threads
-  (`Send + Sync`); nothing spawns on wasm32.
+  (`Send + Sync`); nothing spawns on wasm32. The Thai pack ships from `cargo xtask models`
+  into `models/tessdata/` (Apache-2.0, credited in `ATTRIBUTION.toml`).
+- **Thai word boundaries.** `segment` gives the dictionary words of a recognised line (ICU4X
+  `icu_segmenter`, Unicode-3.0) and decides where a Thai line joins without a space: Tesseract
+  reports each cluster as a word, so two Thai words within a cluster's distance are glued in
+  `Line::text`/`OcrPage::text`, while a real space (a wide gap) survives. The data is desktop
+  only — the web build has no OCR engine, so it is not compiled into wasm.
 - **The tesseract process is fenced in.** The program comes from a user-configured location or
   the PATH, never from document data (the engine validates a configured path as an absolute
   path to an existing executable file before it is used). The language code is allow-listed
@@ -97,8 +103,11 @@ or discards the result. Empty corrections remove words. Searchable acceptance is
 step; editable acceptance writes a separate file. `ocr_dictionary` reads or atomically
 updates the UI's per-language dictionary format through an explicitly root-confined path.
 
-Not yet: languages beyond the tested set (the `ocrs` models read only unaccented Latin; the
-Tesseract side is bounded by its allow-list and whatever its installed language packs cover),
-OCR in the browser (the tesseract module is compiled out for wasm32), the deep scan-cleanup
-options (descreen, background removal, edge-shadow removal), and editable glyph coverage
-beyond the available attributed faces.
+Thai is recognized through the Tesseract engine with the `tha` language pack (`tesseract-ocr-tha`;
+the Apache-2.0 `tha.traineddata` from `tessdata_fast`), while the built-in `ocrs` models still
+read only unaccented Latin. Thai pages are read as `tha+eng` when the Latin pack is available
+(Thai data alone reads `OCR` as `068`), and the pack ships in `models/tessdata/` beside the
+bundled English data so the pair works offline. Other languages stay bounded by the allow-list and
+whatever language packs the installed Tesseract has. Not yet: OCR in the browser (the tesseract
+module is compiled out for wasm32), the deep scan-cleanup options (descreen, background removal,
+edge-shadow removal), and editable glyph coverage beyond the available attributed faces.
