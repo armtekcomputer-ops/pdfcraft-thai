@@ -144,6 +144,24 @@ pub fn arabic_glyph(id: u32) -> Result<GlyphOutline, GlyphError> {
     shaped_glyph(ShapedScript::Arabic, id)
 }
 
+/// Per-character offsets (em units) that place Thai marks over their base, read from the same
+/// Harfrust run the shaped Add Text path draws: a base letter has no offset and is omitted.
+/// Used by the OCR text layer, whose per-character codes cannot carry a mark position.
+pub fn thai_char_offsets(text: &str) -> Vec<(char, [f64; 2])> {
+    let Ok(clusters) = shape_thai(text) else { return Vec::new() };
+    let mut out = Vec::new();
+    for cluster in clusters {
+        let mut glyphs = cluster.glyphs.iter();
+        for ch in cluster.text.chars() {
+            let Some((_, off)) = glyphs.next() else { break };
+            if off[0].abs() > 1e-9 || off[1].abs() > 1e-9 {
+                out.push((ch, *off));
+            }
+        }
+    }
+    out
+}
+
 /// A bounded outline from the same face that produced the shaped glyph id.
 pub fn shaped_glyph(script: ShapedScript, id: u32) -> Result<GlyphOutline, GlyphError> {
     let (font, _) = face(script).ok_or(GlyphError::NoFont)?;

@@ -78,6 +78,9 @@ let layer = visible_text_layer(&placed, &plan);          // visible text: the ed
 - **Editable output uses display glyphs.** `visible_text_layer` writes visible text whose
   size comes from the box height and whose horizontal scaling uses real font advances.
   Beyond WinAnsi, attributed craft-fonts faces supply outline Type3 glyphs with `/ToUnicode`.
+  A Thai combining mark has no advance: the plan keeps the GPOS offset Harfrust places it at
+  and the word is positioned one character at a time (scaling left at 100) so the mark sits
+  over its base instead of being refused as `?`.
   Uncovered characters become `?` and are reported in editable output notes; searchable
   output retains them. The engine refuses nonfinite geometry or oversized input before
   planning fonts: 4 MiB of text and 65,536 words, across all pages for editable export.

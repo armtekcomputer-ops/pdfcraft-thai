@@ -167,7 +167,10 @@ fn glyph_in_face(bytes: &[u8], ch: char) -> Result<GlyphOutline, GlyphError> {
     let Some(gid) = font.charmap().map(ch) else { return Err(GlyphError::Missing) };
     let advances = font.glyph_metrics(Size::unscaled(), loc);
     let width = advances.advance_width(gid).unwrap_or(0.0) as f64 * scale;
-    if !width.is_finite() || width <= 0.0 || width > 2.0 {
+    // A Thai (or other Indic) combining mark has a zero advance by design: its outline is
+    // positioned by GPOS over the base. Refusing it made every mark a `?`; the caller places
+    // it, so accept a zero advance as long as the glyph actually draws something.
+    if !width.is_finite() || !(0.0..=2.0).contains(&width) {
         return Err(GlyphError::Missing);
     }
     bounded_outline(&font, gid, width)

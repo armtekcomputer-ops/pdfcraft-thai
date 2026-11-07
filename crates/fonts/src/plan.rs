@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use pdfcraft_cos::ObjRef;
 
-use crate::{CraftFont, GlyphOutline, craft_glyph, document_japanese_font, face_has, fits_win_ansi, win_ansi_char};
+use crate::{CraftFont, GlyphOutline, craft_glyph, document_japanese_font, face_has, fits_win_ansi, thai_char_offsets, win_ansi_char};
 
 /// Unique characters per Type3 font: the same bound the text-editing fallback uses, so one
 /// hostile word cannot balloon into thousands of glyph streams. A face with more characters
@@ -33,6 +33,10 @@ pub struct PlannedType3 {
     pub family: &'static str,
     /// (character, outline with its advance) per code, in code order.
     pub glyphs: Vec<(char, GlyphOutline)>,
+    /// Where each code's glyph sits relative to the pen, in em units (parallel to `glyphs`).
+    /// Thai marks have no advance and are placed by GPOS over their base; the content writer
+    /// applies these offsets because a per-character code cannot carry one.
+    pub offsets: Vec<[f64; 2]>,
     /// The resource name the content references (`PCOcr`, `PCOcr1`, …); empty until registered.
     pub name: String,
     /// The built font object, shared by every page that uses the font; set at registration.
@@ -41,11 +45,16 @@ pub struct PlannedType3 {
 
 impl PlannedType3 {
     fn new(family: &'static str) -> Self {
-        PlannedType3 { family, glyphs: Vec::new(), name: String::new(), object: None }
+        PlannedType3 { family, glyphs: Vec::new(), offsets: Vec::new(), name: String::new(), object: None }
     }
 
     fn push(&mut self, ch: char, glyph: GlyphOutline) -> u8 {
+        self.push_at(ch, glyph, [0.0, 0.0])
+    }
+
+    fn push_at(&mut self, ch: char, glyph: GlyphOutline, offset: [f64; 2]) -> u8 {
         self.glyphs.push((ch, glyph));
+        self.offsets.push(offset);
         self.glyphs.len() as u8
     }
 }
@@ -92,6 +101,10 @@ impl TextPlan {
                 plan.words.push(Vec::new());
                 continue;
             };
+            // Thai marks are placed by GPOS over their base; the shape run knows where. The
+            // plan's per-character codes cannot carry that, so it is stored beside the glyph.
+            let mark_offsets: std::collections::HashMap<char, [f64; 2]> =
+                if word.chars().any(is_thai_char) { thai_char_offsets(word).into_iter().collect() } else { std::collections::HashMap::new() };
             let mut enc: Vec<(usize, u8)> = Vec::with_capacity(word.len());
             let mut run: Option<usize> = None;
             for ch in word.chars() {
@@ -102,7 +115,7 @@ impl TextPlan {
                 }
                 if let Ok(glyph) = craft_glyph(face, ch)
                     && plan.planned_glyphs() < MAX_PLAN_GLYPHS
-                    && let Some((fi, code)) = plan.add_glyph(face, ch, glyph)
+                    && let Some((fi, code)) = plan.add_glyph(face, ch, glyph, mark_offsets.get(&ch).copied().unwrap_or([0.0, 0.0]))
                 {
                     plan.index.insert(ch, (fi, code));
                     enc.push((fi, code));
@@ -136,6 +149,12 @@ impl TextPlan {
         self.missing
     }
 
+    /// Where one planned code's glyph sits relative to the pen, in em units (Thai marks carry
+    /// their GPOS offset here). `[0.0, 0.0]` for anything out of range.
+    pub fn offset(&self, font: usize, code: u8) -> [f64; 2] {
+        self.fonts.get(font).and_then(|f| f.offsets.get(usize::from(code).checked_sub(1)?)).copied().unwrap_or([0.0, 0.0])
+    }
+
     /// The advance of one planned code, in em units (the Type3 glyphs' own widths). `0.0` for
     /// anything out of range.
     pub fn advance(&self, font: usize, code: u8) -> f64 {
@@ -160,9 +179,9 @@ impl TextPlan {
     }
 
     /// Add a glyph to the face's current font (a fresh one when that font is full).
-    fn add_glyph(&mut self, face: &CraftFont, ch: char, glyph: GlyphOutline) -> Option<(usize, u8)> {
+    fn add_glyph(&mut self, face: &CraftFont, ch: char, glyph: GlyphOutline, offset: [f64; 2]) -> Option<(usize, u8)> {
         let fi = self.font_of_face(face.family)?;
-        let code = self.fonts[fi].push(ch, glyph);
+        let code = self.fonts[fi].push_at(ch, glyph, offset);
         Some((fi, code))
     }
 
@@ -195,6 +214,11 @@ impl TextPlan {
         let code = self.fonts[fi].push('?', glyph);
         Some((fi, code))
     }
+}
+
+/// Whether `c` is a Thai character (U+0E00–U+0E7F), the script whose marks need GPOS offsets.
+fn is_thai_char(c: char) -> bool {
+    matches!(c, '\u{0E00}'..='\u{0E7F}')
 }
 
 /// The faces that can draw document text, in preference order: the Japanese document face
@@ -410,5 +434,26 @@ mod tests {
         // The emoji has no glyph in any bundled face; the kana/kanji do.
         assert_eq!(plan.missing(), 1);
         assert_eq!(plan.encoding(0).len(), 4, "the emoji still has an encoding: the font's ?");
+    }
+
+    /// Thai combining marks have no advance by design: the face draws them over the base and
+    /// GPOS says where. They used to be refused as "missing" and printed as `?`.
+    #[test]
+    fn thai_marks_are_planned_with_their_gpos_offset() {
+        if crate::CRAFT_FONTS.is_empty() {
+            eprintln!("skipping: built without craft-fonts (set CRAFT_FONTS_DIR to run it)");
+            return;
+        }
+        let plan = TextPlan::for_words(["น้ำใจ"]);
+        assert_eq!(plan.missing(), 0, "every Thai character is planned, marks included");
+        let enc = plan.encoding(0);
+        assert_eq!(enc.len(), "น้ำใจ".chars().count(), "one code per character");
+        let marks: Vec<_> = enc.iter().filter(|&&(f, c)| plan.advance(f, c) == 0.0).collect();
+        assert_eq!(marks.len(), 1, "the mai ek above น is the only zero-advance glyph");
+        let (f, c) = *marks[0];
+        let off = plan.offset(f, c);
+        assert!(off != [0.0, 0.0], "the mark carries its GPOS offset, not just a zero advance");
+        assert!(plan.advance_of(enc) > 0.0, "the base still advances the pen");
+        assert!(plan.fonts.iter().all(|font| font.offsets.len() == font.glyphs.len()), "offsets stay parallel to glyphs");
     }
 }

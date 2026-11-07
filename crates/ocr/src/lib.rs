@@ -376,7 +376,15 @@ pub fn visible_text_layer_at(words: &[PlacedWord], plan: &pdfcraft_fonts::TextPl
             continue;
         }
         let size = height / BOX_EM;
-        let runs = planned_runs(plan, word_offset.saturating_add(i));
+        let index = word_offset.saturating_add(i);
+        let runs = planned_runs(plan, index);
+        // A word with a zero-advance glyph (a Thai mark) or a GPOS offset is positioned one
+        // character at a time: the font's own advances cannot express where a mark sits, so
+        // the plan carries the offset and each glyph gets its own text matrix.
+        let precise = {
+            let enc = plan.encoding(index);
+            plan.registered(enc) && enc.iter().any(|&(f, c)| plan.advance(f, c) <= 0.0 || plan.offset(f, c) != [0.0, 0.0])
+        };
         // The word's natural advance at this size: Helvetica's approximation, or the exact sum
         // of the planned glyphs' widths.
         let natural = runs.as_ref().map_or_else(|| helvetica_width(&w.text, size), |(_, total)| total * size);
@@ -388,7 +396,9 @@ pub fn visible_text_layer_at(words: &[PlacedWord], plan: &pdfcraft_fonts::TextPl
         let tz = (across / natural * 100.0).max(1.0);
         // The baseline sits above the box's bottom edge by the descender depth.
         let o = [w.origin[0] + vx * DESCENT * size, w.origin[1] + vy * DESCENT * size];
-        out.extend_from_slice(format!("{} Tz ", num(tz)).as_bytes());
+        // Scaling would distort a precisely placed glyph and is unnecessary there: every
+        // character is positioned by its own matrix.
+        out.extend_from_slice(format!("{} Tz ", num(if precise { 100.0 } else { tz })).as_bytes());
         match &runs {
             None => {
                 if current.as_ref().is_some_and(|(f, s)| f != "PCHelv" || *s != size) {
@@ -398,6 +408,25 @@ pub fn visible_text_layer_at(words: &[PlacedWord], plan: &pdfcraft_fonts::TextPl
                 out.extend_from_slice(format!("{} {} {} {} {} {} Tm ", num(ux), num(uy), num(vx), num(vy), num(o[0]), num(o[1])).as_bytes());
                 out.extend(pdfcraft_fonts::literal(&pdfcraft_fonts::win_ansi(&w.text)));
                 out.extend_from_slice(b" Tj\n");
+            }
+            Some((planned, total)) if precise => {
+                let enc = plan.encoding(index);
+                let mut cum = 0.0;
+                for &(f, code) in enc {
+                    let font = plan.fonts[f].name.as_str();
+                    if current.as_ref().is_some_and(|(name, s)| *name != font || *s != size) {
+                        out.extend_from_slice(format!("/{font} {} Tf ", num(size)).as_bytes());
+                        current = Some((font.to_string(), size));
+                    }
+                    let off = plan.offset(f, code);
+                    let frac = cum / total;
+                    let x = o[0] + w.across[0] * frac + ux * off[0] * size + vx * off[1] * size;
+                    let y = o[1] + w.across[1] * frac + uy * off[0] * size + vy * off[1] * size;
+                    out.extend_from_slice(format!("{} {} {} {} {} {} Tm ", num(ux), num(uy), num(vx), num(vy), num(x), num(y)).as_bytes());
+                    out.extend(pdfcraft_fonts::literal(&[code]));
+                    out.extend_from_slice(b" Tj\n");
+                    cum += plan.advance(f, code);
+                }
             }
             Some((planned, total)) => {
                 for run in planned {
@@ -1091,6 +1120,36 @@ mod tests {
                 }
             }
             (w, h, px)
+        }
+
+        /// A Thai mark has no advance, so the word cannot be stretched as one run: every
+        /// character gets its own matrix, the mark is shifted by its GPOS offset, and the
+        /// horizontal scaling is left at 100 so the offset is not distorted.
+        #[test]
+        fn visible_text_layer_positions_a_thai_mark_at_its_offset() {
+            use crate::{PlacedWord, visible_text_layer};
+            let mut plan = pdfcraft_fonts::TextPlan::for_words(["น้ำใจ"]);
+            if plan.encoding(0).is_empty() {
+                eprintln!("skipping: built without craft-fonts (set CRAFT_FONTS_DIR to run it)");
+                return;
+            }
+            for font in &mut plan.fonts {
+                if font.name.is_empty() {
+                    font.name = "PCThai".to_string();
+                }
+            }
+            let word = PlacedWord {
+                text: "น้ำใจ".into(),
+                origin: [10.0, 100.0],
+                across: [60.0, 0.0],
+                up: [0.0, 12.0],
+                confidence: None,
+                source: "tesseract".into(),
+            };
+            let content = String::from_utf8(visible_text_layer(&[word], &plan)).unwrap();
+            assert!(content.contains("100 Tz"), "a precise word is not stretched: {content}");
+            assert_eq!(content.matches(" Tm ").count(), "น้ำใจ".chars().count(), "one matrix per character: {content}");
+            assert!(!content.contains("?"), "no character is substituted: {content}");
         }
 
         /// A Thai line is drawn from clusters that Tesseract reports one by one: they must join
