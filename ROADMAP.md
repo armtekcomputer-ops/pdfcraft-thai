@@ -1,5 +1,7 @@
 # PdfCraft roadmap
 
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (M10, Paddle Thai OCR: an offline PaddleOCR engine (PP-OCRv3 mobile detection + PP-OCRv5 mobile Thai recognition, Apache-2.0 ONNX through rten) reads Thai and leads `Automatic`, with Tesseract as the second opinion; on the six-page, 4,199-character corpus its total CER is 0.64% (27 edits) against Tesseract's 2.12% (89 edits). Estimates unchanged.)
+
 > **Last reviewed:** 2026-11-07 · **Last updated:** 2026-11-07 · **Change:** minor (M10, Thai OCR visual check: the editable output is rendered in a test and asserted pixel-wise — Thai ink stays inside the recognised word box, nothing spills outside it, and removing the mark changes the render, so the mark is drawn above its base rather than dropped or substituted; the tests are gated on the craft-fonts build input. Estimates unchanged)
 
 > **Last reviewed:** 2026-11-03 | **Last updated:** 2026-11-03 | **Change:** patch (M5 #5850 review: indirect typewriter intent and composer edits preserve outer whitespace; movement regression commits by outside click; estimates unchanged)

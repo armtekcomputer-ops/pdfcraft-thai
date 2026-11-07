@@ -1,13 +1,25 @@
-//! `cargo xtask ocr-bench [DIR] [--target <percent>]`: Thai OCR character error rate over a local
-//! corpus.
+//! `cargo xtask ocr-bench [DIR] [--target <percent>] [--engine tesseract|paddle]`: Thai OCR
+//! character error rate over a local corpus.
 //!
 //! `DIR` (default `tests/data/thai_ocr`) holds page images and their transcripts: for every
-//! `*.png` with a sibling `*.txt` of the same stem, the installed `tesseract` runs the way the app
-//! runs it — `tesseract <png> stdout -l tha+eng -c tessedit_create_tsv=1` — with `TESSDATA_PREFIX`
-//! pointing at the bundled `assets/models/tessdata` when that directory exists (the caller's
-//! environment is otherwise left alone). The level-5 words of the TSV are joined with spaces.
+//! `*.png` with a sibling `*.txt` of the same stem, one engine reads the page.
+//!
+//! `--engine tesseract` (the default, and the behaviour before the flag existed) runs the
+//! installed `tesseract` the way the app runs it — `tesseract <png> stdout -l tha+eng -c
+//! tessedit_create_tsv=1` — with `TESSDATA_PREFIX` pointing at the bundled
+//! `assets/models/tessdata` when that directory exists (the caller's environment is otherwise
+//! left alone). The level-5 words of the TSV are joined with spaces.
+//!
+//! `--engine paddle` measures the app's own PaddleThai engine without linking it into xtask: it
+//! builds a one-page PDF from the PNG and drives `pdfcraft-cli run --script` (the first document
+//! of a fresh CLI session is id 1) through `doc_create`, `ocr_recognize` (`language` `th`,
+//! `engine` `paddle`) and `doc_export_text`, then scores the exported text exactly like the
+//! tesseract path. The CLI is `$PDFCRAFT_CLI` or `target/debug/pdfcraft-cli`; when the program,
+//! its paddle engine or the three models under `assets/models` are missing the command prints a
+//! "skipped" line and exits zero, like a missing tesseract.
+//!
 //! `--target` sets the pass mark in percent (default [`DEFAULT_TARGET`]) and may appear before or
-//! after `DIR`.
+//! after `DIR`; `--engine` may appear anywhere `--target` may.
 //!
 //! Both sides are normalised with Unicode NFKC before comparison. NFKC folds Thai SARA AM
 //! (U+0E33) into NIKHAHIT (U+0E4D) plus SARA AA (U+0E32), the same sequence the recogniser emits;
@@ -28,12 +40,15 @@
 //! short note, for orientation only.
 //!
 //! The command exits non-zero when the total CER exceeds the target, so CI can use it, and exits
-//! zero with a "skipped" line when `tesseract` is not installed.
+//! zero with a "skipped" line when the chosen engine cannot run here: `tesseract` is not
+//! installed, or the CLI, its paddle engine or the Paddle models are missing.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
 
 /// Where `cargo xtask ocr-bench` looks when no `DIR` is given, relative to the repository root.
@@ -62,29 +77,106 @@ const STDERR_LINES: usize = 3;
 /// The most characters of stderr a failure keeps.
 const STDERR_CHARS: usize = 400;
 
-/// What the command line selected: where the corpus lives and the pass mark in percent.
+/// The CLI the paddle path drives, relative to the repository root (`$PDFCRAFT_CLI` wins).
+const CLI: &str = "target/debug/pdfcraft-cli";
+
+/// The three Paddle models, as named in ATTRIBUTION.toml; all must be present to measure.
+const PADDLE_MODELS: [&str; 3] = ["paddle-text-detection.onnx", "paddle-thai-recognition.onnx", "paddle-thai-dict.txt"];
+
+/// Where the fetched models live, relative to the repository root.
+const MODELS: &str = "assets/models";
+
+/// Which reader a run measures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Engine {
+    /// The installed `tesseract` program, run exactly as the app runs it.
+    #[default]
+    Tesseract,
+    /// The app's PaddleThai engine, driven through `pdfcraft-cli run --script`.
+    Paddle,
+}
+
+impl Engine {
+    /// The name the flag takes and a failure reports.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Tesseract => "tesseract",
+            Self::Paddle => "paddle",
+        }
+    }
+
+    /// Parse one `--engine` value; anything else is refused rather than quietly defaulted.
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "tesseract" => Ok(Self::Tesseract),
+            "paddle" => Ok(Self::Paddle),
+            other => bail!("`{other}` is not an engine; expected tesseract or paddle"),
+        }
+    }
+}
+
+/// What the command line selected: where the corpus lives, the pass mark in percent and the
+/// engine.
 #[derive(Debug, PartialEq)]
 struct Options {
     /// `None` means the default corpus under the repository root.
     dir: Option<PathBuf>,
     /// The total CER a run may reach, in percent.
     target: f64,
+    /// The reader every page goes through.
+    engine: Engine,
+}
+
+/// Why a page's reading failed. An engine that cannot run at all skips the whole command, like a
+/// missing tesseract; a page that fails while the engine works is a measurement failure.
+enum Failure {
+    Unavailable(String),
+    Failed(String),
 }
 
 pub fn run(args: &[String]) -> Result<()> {
     let root = crate::gates::root();
     let options = parse_args(args)?;
-    let dir = options.dir.unwrap_or_else(|| root.join(DEFAULT_DIR));
+    let dir = options.dir.clone().unwrap_or_else(|| root.join(DEFAULT_DIR));
     let target = options.target / 100.0;
     if !dir.is_dir() {
         bail!("{} is not a directory", dir.display());
     }
-    if !tesseract_installed()? {
-        println!("skipped: tesseract is not installed");
-        return Ok(());
-    }
+
+    // Decide up front what reads the pages, and treat a reader that cannot run as the caller's
+    // "skip" (zero exit), the same way a missing tesseract always has.
     let tessdata = root.join(TESSDATA);
     let tessdata = tessdata.is_dir().then_some(tessdata);
+    let cli = match options.engine {
+        Engine::Tesseract => {
+            if !tesseract_installed()? {
+                println!("skipped: tesseract is not installed");
+                return Ok(());
+            }
+            None
+        }
+        Engine::Paddle => {
+            let Some(cli) = cli_program(&root) else {
+                println!(
+                    "skipped: pdfcraft-cli/engine not available (no {}; set PDFCRAFT_CLI or build it with `cargo build -p pdfcraft-cli`)",
+                    root.join(CLI).display()
+                );
+                return Ok(());
+            };
+            if paddle_models(&root).is_none() {
+                println!(
+                    "skipped: pdfcraft-cli/engine not available (the paddle models are missing under {}; run `cargo xtask models`)",
+                    root.join(MODELS).display()
+                );
+                return Ok(());
+            }
+            if !paddle_engine_offered(&cli)? {
+                println!("skipped: pdfcraft-cli/engine not available (the CLI's ocr_recognize has no paddle engine)");
+                return Ok(());
+            }
+            Some(cli)
+        }
+    };
 
     let pages = corpus(&dir)?;
     if pages.is_empty() {
@@ -107,11 +199,20 @@ pub fn run(args: &[String]) -> Result<()> {
                 continue;
             }
         };
-        let hypothesis = match recognize(&png, tessdata.as_deref()) {
-            Ok(tsv) => tsv_words(&tsv).join(" "),
-            Err(note) => {
+        let read = match (&options.engine, cli.as_deref()) {
+            (Engine::Tesseract, _) => recognize(&png, tessdata.as_deref()),
+            (Engine::Paddle, Some(cli)) => recognize_paddle(cli, &png),
+            (Engine::Paddle, None) => Err(Failure::Unavailable("no pdfcraft-cli was chosen".into())),
+        };
+        let hypothesis = match read {
+            Ok(text) => text,
+            Err(Failure::Unavailable(note)) => {
+                println!("skipped: pdfcraft-cli/engine not available: {note}");
+                return Ok(());
+            }
+            Err(Failure::Failed(note)) => {
                 println!("{name:<FILE_WIDTH$} {:>10} {:>7} {:>8}", "-", "-", "FAIL");
-                eprintln!("ocr-bench: {name}: tesseract failed: {note}");
+                eprintln!("ocr-bench: {name}: {} failed: {note}", options.engine.name());
                 failures += 1;
                 continue;
             }
@@ -154,11 +255,13 @@ pub fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Parse `[DIR]` and `--target <percent>` in any order, rejecting anything else.
+/// Parse `[DIR]`, `--target <percent>` and `--engine <name>` in any order, rejecting anything
+/// else.
 fn parse_args(args: &[String]) -> Result<Options> {
-    const USAGE: &str = "usage: cargo xtask ocr-bench [DIR] [--target <percent>]";
+    const USAGE: &str = "usage: cargo xtask ocr-bench [DIR] [--target <percent>] [--engine tesseract|paddle]";
     let mut dir = None;
     let mut target = None;
+    let mut engine = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if arg == "--target" {
@@ -166,6 +269,11 @@ fn parse_args(args: &[String]) -> Result<Options> {
             set_target(&mut target, value)?;
         } else if let Some(value) = arg.strip_prefix("--target=") {
             set_target(&mut target, value)?;
+        } else if arg == "--engine" {
+            let value = rest.next().ok_or_else(|| anyhow!("--engine needs a name; {USAGE}"))?;
+            set_engine(&mut engine, value)?;
+        } else if let Some(value) = arg.strip_prefix("--engine=") {
+            set_engine(&mut engine, value)?;
         } else if arg.starts_with('-') && arg != "-" {
             bail!("unknown option `{arg}`; {USAGE}");
         } else if dir.is_some() {
@@ -174,7 +282,15 @@ fn parse_args(args: &[String]) -> Result<Options> {
             dir = Some(PathBuf::from(arg));
         }
     }
-    Ok(Options { dir, target: target.unwrap_or(DEFAULT_TARGET) })
+    Ok(Options { dir, target: target.unwrap_or(DEFAULT_TARGET), engine: engine.unwrap_or_default() })
+}
+
+/// Record one `--engine` value, refusing a second one.
+fn set_engine(engine: &mut Option<Engine>, value: &str) -> Result<()> {
+    if engine.replace(Engine::parse(value)?).is_some() {
+        bail!("--engine given more than once");
+    }
+    Ok(())
 }
 
 /// Record one `--target` value, refusing a second one.
@@ -225,20 +341,110 @@ fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
 }
 
-/// Run the installed `tesseract` on `png` exactly as the app does, and return its TSV on stdout.
-/// The caller's environment is inherited; only `TESSDATA_PREFIX` is set when a `tessdata` bundle
-/// exists.
-fn recognize(png: &Path, tessdata: Option<&Path>) -> Result<String, String> {
+/// Run the installed `tesseract` on `png` exactly as the app does, and return its words joined
+/// with spaces. The caller's environment is inherited; only `TESSDATA_PREFIX` is set when a
+/// `tessdata` bundle exists.
+fn recognize(png: &Path, tessdata: Option<&Path>) -> Result<String, Failure> {
     let mut command = Command::new("tesseract");
     command.arg(png).args(["stdout", "-l", LANGUAGES, "-c", "tessedit_create_tsv=1"]).stdin(std::process::Stdio::null());
     if let Some(dir) = tessdata {
         command.env("TESSDATA_PREFIX", dir);
     }
-    let output = command.output().map_err(|err| format!("could not start tesseract: {err}"))?;
+    let output = command.output().map_err(|err| Failure::Failed(format!("could not start tesseract: {err}")))?;
     if !output.status.success() {
-        return Err(stderr_tail(&output.stderr));
+        return Err(Failure::Failed(stderr_tail(&output.stderr)));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(tsv_words(&String::from_utf8_lossy(&output.stdout)).join(" "))
+}
+
+/// The CLI the paddle path runs: `$PDFCRAFT_CLI` when set, else the debug build under the
+/// repository root. A program that is not there is the caller's "skip".
+fn cli_program(root: &Path) -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PDFCRAFT_CLI") {
+        return Some(PathBuf::from(path));
+    }
+    let path = root.join(CLI).with_extension(std::env::consts::EXE_EXTENSION);
+    path.is_file().then_some(path)
+}
+
+/// The directory holding all three Paddle models: `$PDFCRAFT_MODELS` when it has them, else the
+/// repository's `assets/models`.
+fn paddle_models(root: &Path) -> Option<PathBuf> {
+    let env = std::env::var_os("PDFCRAFT_MODELS").map(PathBuf::from);
+    env.into_iter().chain([root.join(MODELS)]).find(|dir| PADDLE_MODELS.iter().all(|name| dir.join(name).is_file()))
+}
+
+/// Whether the CLI advertises `paddle` in `ocr_recognize`'s engine list. This asks the program
+/// itself, so an older build without the engine skips instead of failing every page.
+fn paddle_engine_offered(cli: &Path) -> Result<bool> {
+    let output =
+        Command::new(cli).arg("tools").stdin(std::process::Stdio::null()).output().with_context(|| format!("could not run `{}`", cli.display()))?;
+    if !output.status.success() {
+        bail!("`{} tools` failed: {}", cli.display(), stderr_tail(&output.stderr));
+    }
+    let tools: serde_json::Value = serde_json::from_slice(&output.stdout).with_context(|| format!("`{} tools` did not print JSON", cli.display()))?;
+    let offered = tools.as_array().is_some_and(|tools| {
+        tools.iter().any(|tool| {
+            tool["name"] == "ocr_recognize"
+                && tool["input_schema"]["properties"]["engine"]["enum"].as_array().is_some_and(|values| values.iter().any(|v| v == "paddle"))
+        })
+    });
+    Ok(offered)
+}
+
+/// Build a one-page PDF from `png` with the CLI, recognise it with the Paddle engine and return
+/// the exported text. The CLI runs as a child process, so xtask never links the OCR engine.
+fn recognize_paddle(cli: &Path, png: &Path) -> Result<String, Failure> {
+    let dir = temp_dir();
+    let result = run_paddle_script(cli, png, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// The body of [`recognize_paddle`]: write the script, run it, read the text it exported.
+fn run_paddle_script(cli: &Path, png: &Path, dir: &Path) -> Result<String, Failure> {
+    std::fs::create_dir_all(dir).map_err(|err| Failure::Failed(format!("could not make {}: {err}", dir.display())))?;
+    let text = dir.join("page.txt");
+    let script = dir.join("steps.json");
+    // A fresh CLI session numbers its first document 1: doc_create makes it, and the two steps
+    // after it name that id. --root is not needed; the paths are absolute.
+    let steps = json!([
+        { "tool": "doc_create", "args": { "from": "images", "paths": [png.to_string_lossy()] } },
+        { "tool": "ocr_recognize", "args": { "doc": 1, "pages": [1], "language": "th", "engine": "paddle" } },
+        { "tool": "doc_export_text", "args": { "doc": 1, "path": text.to_string_lossy() } },
+    ]);
+    std::fs::write(&script, serde_json::to_vec_pretty(&steps).map_err(|err| Failure::Failed(err.to_string()))?)
+        .map_err(|err| Failure::Failed(format!("could not write {}: {err}", script.display())))?;
+    let output = Command::new(cli)
+        .args(["run", "--script"])
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| Failure::Failed(format!("could not start {}: {err}", cli.display())))?;
+    if !output.status.success() {
+        let note = stderr_tail(&output.stderr);
+        return Err(if engine_unavailable(&note) { Failure::Unavailable(note) } else { Failure::Failed(note) });
+    }
+    std::fs::read_to_string(&text).map_err(|err| Failure::Failed(format!("the CLI wrote no {}: {err}", text.display())))
+}
+
+/// Whether a CLI error says the requested engine cannot run here, as opposed to a page that could
+/// not be read. The tool refuses an engine it does not offer up front ("unsupported engine
+/// ..."), and the engine names missing models when they cannot be loaded.
+fn engine_unavailable(note: &str) -> bool {
+    let note = note.to_ascii_lowercase();
+    note.contains("unsupported engine")
+        || note.contains("not available")
+        || note.contains("no models")
+        || (note.contains("models") && note.contains("not installed"))
+}
+
+/// A fresh, empty scratch directory for one page's script, named by process and a counter.
+fn temp_dir() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-bench-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
 }
 
 /// The end of what the program wrote to stderr, on one line and bounded in length.
@@ -394,6 +600,40 @@ mod tests {
         assert_eq!(before.dir, Some(PathBuf::from("pages")));
         let after = parse_args(&args(&["pages", "--target", "15"])).expect("target after the directory");
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn engine_defaults_to_tesseract() {
+        let options = parse_args(&args(&[])).expect("no arguments");
+        assert_eq!(options.engine, Engine::Tesseract);
+        assert_eq!(options.engine.name(), "tesseract");
+    }
+
+    #[test]
+    fn engine_flag_parses_both_values_in_any_order() {
+        let default = parse_args(&args(&["pages", "--target", "12"])).expect("no engine");
+        for spelling in ["tesseract", "TESSERACT", " tesseract "] {
+            assert_eq!(parse_args(&args(&["--engine", spelling])).expect("tesseract").engine, Engine::Tesseract);
+        }
+        let before = parse_args(&args(&["--engine", "paddle", "pages", "--target", "12"])).expect("engine first");
+        assert_eq!(before.engine, Engine::Paddle);
+        assert_eq!(before.dir, default.dir);
+        assert_eq!(before.target, default.target);
+        let after = parse_args(&args(&["pages", "--target", "12", "--engine", "paddle"])).expect("engine last");
+        assert_eq!(after, before);
+        let equals = parse_args(&args(&["pages", "--engine=paddle"])).expect("--engine=value");
+        assert_eq!(equals.engine, Engine::Paddle);
+        assert_eq!(equals.dir, Some(PathBuf::from("pages")));
+    }
+
+    #[test]
+    fn engine_rejects_what_is_not_an_engine() {
+        assert!(parse_args(&args(&["--engine", "paddle "])).is_ok(), "surrounding space is trimmed");
+        for value in ["ocrs", "auto", "", "PaddleThai", "paddle2"] {
+            assert!(parse_args(&args(&["--engine", value])).is_err(), "{value:?} should be rejected");
+        }
+        assert!(parse_args(&args(&["--engine"])).is_err());
+        assert!(parse_args(&args(&["--engine", "paddle", "--engine", "tesseract"])).is_err());
     }
 
     #[test]

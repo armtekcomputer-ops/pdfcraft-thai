@@ -278,10 +278,15 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
                 EngineChoice::Auto => tl!("Automatic"),
                 EngineChoice::Ocrs => tl!("Built-in"),
                 EngineChoice::Tesseract => tl!("Tesseract"),
+                EngineChoice::Paddle => tl!("PaddleOCR (Thai)"),
             };
             craft_ui::ComboBox::from_id_salt("ocr-engine").selected_text(engine_name).width(220.0).show_ui(ui, |ui| {
-                let choices: [(EngineChoice, &str); 3] =
-                    [(EngineChoice::Auto, "Automatic"), (EngineChoice::Ocrs, "Built-in"), (EngineChoice::Tesseract, "Tesseract")];
+                let choices: [(EngineChoice, &str); 4] = [
+                    (EngineChoice::Auto, "Automatic"),
+                    (EngineChoice::Ocrs, "Built-in"),
+                    (EngineChoice::Tesseract, "Tesseract"),
+                    (EngineChoice::Paddle, "PaddleOCR (Thai)"),
+                ];
                 for (choice, name) in choices {
                     ui.selectable_value(&mut d.engine, choice, tl!(name));
                 }
@@ -1258,6 +1263,20 @@ mod tests {
         let mut explicit = OcrDraft::default();
         explicit.apply_pref(&serde_json::json!({ "engine": "auto", "strategy": "primary" }));
         assert_eq!((explicit.engine, explicit.strategy), (EngineChoice::Auto, MergeStrategy::PrimaryOnly));
+    }
+
+    /// The PaddleOCR engine choice persists and restores like the others: the dialog's draft
+    /// writes it under its tool name and reads it back as the same choice.
+    #[test]
+    fn the_paddle_engine_choice_round_trips_through_the_preferences() {
+        let d = OcrDraft { engine: EngineChoice::Paddle, ..Default::default() };
+        let saved = d.to_pref();
+        assert_eq!(saved["engine"], "paddle");
+        let mut restored = OcrDraft::default();
+        restored.apply_pref(&saved);
+        assert_eq!(restored.engine, EngineChoice::Paddle, "the dialog comes back on PaddleOCR");
+        assert_eq!(restored.settings().engine, EngineChoice::Paddle, "and a run reads with it");
+        assert_eq!(restored.strategy, MergeStrategy::PrimaryOnly, "a named engine reads alone");
     }
 
     /// Two inputs of one file name (from different folders, or differing only in case) would

@@ -24,8 +24,9 @@ impl Automation {
             settings.engine = match e.trim().to_ascii_lowercase().as_str() {
                 "ocrs" => EngineChoice::Ocrs,
                 "tesseract" => EngineChoice::Tesseract,
+                "paddle" | "paddleocr" | "paddle-ocr" => EngineChoice::Paddle,
                 "auto" | "automatic" | "ensemble" => EngineChoice::Auto,
-                other => return Err(ToolError::InvalidArgs(format!("unsupported engine {other:?} (ocrs, tesseract or auto)"))),
+                other => return Err(ToolError::InvalidArgs(format!("unsupported engine {other:?} (ocrs, tesseract, paddle or auto)"))),
             };
         }
         settings.strategy = match a.opt_str("strategy")? {

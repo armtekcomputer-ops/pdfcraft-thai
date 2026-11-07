@@ -1366,6 +1366,7 @@ fn engine_label(engine: EngineChoice) -> &'static str {
         EngineChoice::Auto => tl!("Automatic"),
         EngineChoice::Ocrs => "ocrs",
         EngineChoice::Tesseract => "Tesseract",
+        EngineChoice::Paddle => tl!("PaddleOCR (Thai)"),
     }
 }
 
@@ -1385,7 +1386,12 @@ fn strategy_label(strategy: MergeStrategy) -> &'static str {
 fn engine_combo(ui: &mut egui::Ui, engine: &mut EngineChoice, strategy: &mut MergeStrategy) {
     ocr_ui::keep_asking_while_probing(ui.ctx());
     craft_ui::ComboBox::from_id_salt("ocr-verify-engine").width(120.0).selected_text(engine_label(*engine)).show_ui(ui, |ui| {
-        for (choice, label) in [(EngineChoice::Auto, tl!("Automatic")), (EngineChoice::Ocrs, "ocrs"), (EngineChoice::Tesseract, "Tesseract")] {
+        for (choice, label) in [
+            (EngineChoice::Auto, tl!("Automatic")),
+            (EngineChoice::Ocrs, "ocrs"),
+            (EngineChoice::Tesseract, "Tesseract"),
+            (EngineChoice::Paddle, tl!("PaddleOCR (Thai)")),
+        ] {
             let why = pdfcraft_engine::ocr::engine_unavailable_reason(choice);
             let resp = ui.add_enabled(why.is_none(), egui::Button::selectable(*engine == choice, label));
             let clicked = resp.clicked();
@@ -1398,6 +1404,7 @@ fn engine_combo(ui: &mut egui::Ui, engine: &mut EngineChoice, strategy: &mut Mer
                         EngineChoice::Auto => tl!("Both engines, combined as the Strategy says"),
                         EngineChoice::Ocrs => tl!("The built-in engine (pure Rust)"),
                         EngineChoice::Tesseract => tl!("The tesseract program, run as an external process"),
+                        EngineChoice::Paddle => tl!("The PaddleOCR models, for Thai"),
                     });
                 }
             }

@@ -24,6 +24,8 @@
 pub mod confidence;
 pub mod merge;
 mod ocrs;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod paddle;
 pub mod preprocess;
 pub use pdfcraft_fonts::segment;
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,6 +34,12 @@ pub mod tesseract;
 pub use confidence::{ConfidenceBand, band_for, is_suspect, low_confidence};
 pub use merge::{MergeStrategy, StrategyOutcome, mean_confidence, recognize_with_strategy, rover_merge};
 pub use ocrs::{ALPHABET, DETECTION_MODEL, LANGUAGES, Models, Ocr, OcrsRecognizer, RECOGNITION_MODEL};
+#[cfg(not(target_arch = "wasm32"))]
+pub use paddle::PaddleRecognizer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use paddle::RECOGNITION_MODEL as PADDLE_RECOGNITION_MODEL;
+#[cfg(not(target_arch = "wasm32"))]
+pub use paddle::{DETECTION_MODEL as PADDLE_DETECTION_MODEL, DICT as PADDLE_DICT, LANGUAGES as PADDLE_LANGUAGES, PaddleModels};
 
 pub use pdfcraft_fonts::TextPlan;
 pub use pdfcraft_fonts::helvetica_width;

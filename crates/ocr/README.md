@@ -19,14 +19,26 @@ let layer = visible_text_layer(&placed, &plan);          // visible text: the ed
 ```
 
 - **Engines behind one trait.** A [`Recognizer`] reports its `id`, whether it is `available`,
-  the languages it reads, and reads `Vec<Line>` from an image. Two exist: the pure-Rust
+  the languages it reads, and reads `Vec<Line>` from an image. Three exist: the pure-Rust
   `OcrsRecognizer` (the `ocrs` crate, MIT/Apache-2.0, with its pre-trained models,
   CC-BY-SA-4.0, fetched by `cargo xtask models`; found via `$PDFCRAFT_MODELS` or `models/`
-  beside the executable — see ATTRIBUTION.toml), and — off the web build —
-  `tesseract::TesseractCli`, which drives an installed `tesseract` binary as an external
-  process: never linked, bundled or downloaded. Implementations are shared across threads
+  beside the executable — see ATTRIBUTION.toml); `tesseract::TesseractCli` (off the web
+  build), which drives an installed `tesseract` binary as an external process: never linked,
+  bundled or downloaded; and `paddle::PaddleRecognizer`, the offline Thai engine described
+  next. Implementations are shared across threads
   (`Send + Sync`); nothing spawns on wasm32. The Thai pack ships from `cargo xtask models`
   into `models/tessdata/` (Apache-2.0, credited in `ATTRIBUTION.toml`).
+- **PaddleOCR reads Thai, offline.** `paddle::PaddleRecognizer` (id `paddle`, language `th`
+  only) runs a PP-OCRv3 mobile text-detection model and a PP-OCRv5 mobile Thai recognition
+  model with a 524-entry dictionary, all as ONNX through `rten`, so nothing leaves the
+  machine. The three files are Apache-2.0 and staged by `cargo xtask models` as
+  `paddle-text-detection.onnx`, `paddle-thai-recognition.onnx` and `paddle-thai-dict.txt`;
+  they are found like the `ocrs` models (`$PDFCRAFT_MODELS`, then beside the executable), and
+  the engine is compiled out for wasm32. Under `Automatic` it reads Thai first, with
+  Tesseract as the second opinion; choosing Paddle explicitly for another language is refused
+  with a message naming Tesseract. Known limits: boxes are axis-aligned connected components
+  rather than PaddleOCR's perspective mini-boxes, so box counts and a couple of words differ
+  from PaddleOCR's own output, and the models report no confidence (words carry `None`).
 - **Thai word boundaries.** `segment` gives the dictionary words of a recognised line (ICU4X
   `icu_segmenter`, Unicode-3.0) and decides where a Thai line joins without a space: Tesseract
   reports each cluster as a word, so two Thai words within a cluster's distance are glued in
@@ -112,15 +124,21 @@ or discards the result. Empty corrections remove words. Searchable acceptance is
 step; editable acceptance writes a separate file. `ocr_dictionary` reads or atomically
 updates the UI's per-language dictionary format through an explicitly root-confined path.
 
-Thai is recognized through the Tesseract engine with the `tha` language pack (`tesseract-ocr-tha`;
-the Apache-2.0 `tha.traineddata` from `tessdata_fast`), while the built-in `ocrs` models still
-read only unaccented Latin. Thai pages are read as `tha+eng` when the Latin pack is available
-(Thai data alone reads `OCR` as `068`), and the pack ships in `models/tessdata/` beside the
-bundled English data so the pair works offline. Other languages stay bounded by the allow-list and
-whatever language packs the installed Tesseract has. Not yet: OCR in the browser (the tesseract
-module is compiled out for wasm32), the deep scan-cleanup options (descreen, background removal,
-edge-shadow removal), and editable glyph coverage beyond the available attributed faces.
+Thai is recognized by either offline route: the built-in PaddleOCR engine
+(`pdfcraft_ocr::paddle::PaddleRecognizer`, PP-OCRv3 detection + PP-OCRv5 Thai recognition as
+Apache-2.0 ONNX through `rten`) or the Tesseract engine with the `tha` language pack
+(`tesseract-ocr-tha`; the Apache-2.0 `tha.traineddata` from `tessdata_fast`). Tesseract reads
+Thai pages as `tha+eng` when the Latin pack is available (Thai data alone reads `OCR` as
+`068`), and the pack ships in `models/tessdata/` beside the bundled English data so the pair
+works offline. `Automatic` uses Paddle first for Thai, with Tesseract as the second opinion;
+an explicit Paddle choice for a non-Thai language is refused with a message naming Tesseract,
+and the built-in `ocrs` models still read only unaccented Latin. Other languages stay bounded
+by the allow-list and whatever language packs the installed Tesseract has. Not yet: OCR in the
+browser (both offline modules are compiled out for wasm32), the deep scan-cleanup options
+(descreen, background removal, edge-shadow removal), and editable glyph coverage beyond the
+available attributed faces.
 
-Thai accuracy is measured on the licence-clean six-page corpus in `tests/data/thai_ocr/` (ASEAN
-Charter, 200 dpi) with `cargo xtask ocr-bench`, which reports 2.12% total character error rate
-over 4,199 reference characters.
+Thai accuracy is measured on the licence-clean six-page corpus in `tests/data/thai_ocr/`
+(ASEAN Charter, 200 dpi): `cargo xtask ocr-bench --engine paddle` reports 0.64% total
+character error rate (27 edits) and `--engine tesseract` 2.12% (89 edits), over 4,199
+reference characters.

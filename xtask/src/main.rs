@@ -57,7 +57,7 @@ const COMMANDS: &[(&str, &str, Command)] = &[
     ("models", "Fetch the OCR models (ATTRIBUTION.toml kind = \"model\") into assets/models/, verified by SHA-256", assets::models),
     (
         "ocr-bench",
-        "Thai OCR character error rate over PNG/transcript pairs in tests/data/thai_ocr (--target <percent>, default 10%; needs tesseract)",
+        "Thai OCR character error rate over PNG/transcript pairs in tests/data/thai_ocr (--target <percent>, default 10%; --engine tesseract|paddle, default tesseract)",
         ocr_bench::run,
     ),
     ("demo-pdf", "Build dist/demo/pdfcraft-showcase.pdf (needs Google Chrome or Chromium)", demo_pdf::run),

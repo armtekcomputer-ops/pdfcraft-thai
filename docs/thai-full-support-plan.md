@@ -1,6 +1,6 @@
 # แผนพัฒนา: Thai Full Support (ฟอนต์ + OCR)
 
-> **สถานะล่าสุด (2026-11-07):** ดูหัวข้อ 0 ด้านล่างสำหรับงานที่ปิดแล้วและที่ยังติดข้อจำกัดภายนอก
+> **สถานะล่าสุด (2026-11-08):** ดูหัวข้อ 0 ด้านล่างสำหรับงานที่ปิดแล้วและที่ยังติดข้อจำกัดภายนอก (D3 offline ONNX Thai ปิดแล้ว)
 
 ## 0. สถานะความคืบหน้า
 
@@ -18,7 +18,8 @@
 | ตัดบรรทัดไทยตามขอบเขตคำ (Add Text) | `ecef5fc2` |
 | TIS-620/CP874 ทั้ง extraction และ renderer (vendored patch 76) | `0d72ad49` |
 | เปิด Thai UI: ตรวจพบว่า catalog มีแล้ว + เพิ่ม tests `thai_catalog_loads` และแก้ docs ที่ค้าง | `877e3a37` |
-| D6 accuracy corpus (public domain): ASEAN Charter 6 หน้า 200 dpi, 4,199 ตัวอักษร, CER 2.12% | `cargo xtask ocr-bench` |
+| D6 accuracy corpus (public domain): ASEAN Charter 6 หน้า 200 dpi, 4,199 ตัวอักษร, Paddle CER 0.64% / Tesseract 2.12% | `cargo xtask ocr-bench` |
+| D3 offline ONNX Thai: PaddleOCR PP-OCRv3 mobile detection + PP-OCRv5 mobile Thai recognition (Apache-2.0, รันผ่าน `rten`) เป็นผู้อ่านไทยตัวหลักใต้ `Automatic`; CER 0.64% (27 edits) เทียบ Tesseract 2.12% (89 edits) บน corpus เดียวกัน | working tree: `crates/ocr/src/paddle.rs`; `cargo xtask ocr-bench --engine paddle` |
 | ใช้ฟอนต์ไทยที่หน้า PDF ฝังอยู่เอง (Slice A): ToUnicode + explicit zero width นำกลับมาใช้ ไม่ตกไป Type3 | working tree |
 
 ### ทำได้บางส่วน (partial)
@@ -31,9 +32,10 @@
 |---|---|
 | C1 catalog ภาษาไทย | **มีอยู่แล้ว** ใน craft-i18n ที่ rev ที่ pin ไว้ (3,300 entries, 0 ช่องว่าง) — เปิดใช้ + เพิ่ม tests/docs แล้ว (`877e3a37`); เหลือ native review เท่านั้น |
 | A2 Thai Bold / A3 oblique | craft-fonts pin `b076417b` มีเฉพาะ Noto Sans Thai Regular |
-| D3 offline ONNX Thai | ยังไม่มีโมเดลที่ license เปิดและรันบน rten ได้; ใช้ tesseract `tha` แทน |
 | B3 justify / B5 PDF/UA tagging | ต่อยอดจาก segmentation ที่มีแล้ว แต่ยังไม่เริ่ม |
 | วรรณยุกต์แทนที่ด้วย glyph อื่นจะผ่าน pixel test | ต้องมี golden image (ยืนยันรูปร่าง) ไม่ใช่แค่ pixel diff |
+
+> หลัง D3 ปิด: ข้อจำกัดที่เหลือของ Thai full support คือ native review ของ catalog ไทย (C1) และฟอนต์ Thai Bold/oblique (A2/A3) รวมถึง B3/B5 ที่ยังไม่เริ่ม; ตัวอ่าน Paddle เองยังใช้กล่องแบบ axis-aligned ไม่ใช่ perspective mini-box และไม่รายงาน confidence
 
 
 > เป้าหมาย: ให้ PdfCraft Thai รองรับภาษาไทยครบทั้ง **การแสดง/แก้ไข/บันทึกข้อความไทย** และ **OCR ไทย**

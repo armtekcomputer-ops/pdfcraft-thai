@@ -28,8 +28,11 @@ pub fn validate_ocr_words<'a>(words: impl IntoIterator<Item = &'a PlacedWord>) -
 }
 
 /// Which recognition engine to use. The default is ocrs, the pure-Rust engine; "Automatic" is
-/// an ensemble — ocrs reading first, Tesseract as a second opinion, merged per the strategy —
-/// when both are available.
+/// an ensemble — the best reader for the language first, the other one as a second opinion,
+/// merged per the strategy — when both are available. For Thai the best reader is PaddleOCR
+/// (its Thai recognition model reads the script far more accurately than Tesseract), so
+/// Automatic pairs PaddleOCR with Tesseract there and never lets the Latin-only ocrs engine
+/// read Thai.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum EngineChoice {
     /// The pure-Rust ocrs engine (the default).
@@ -37,8 +40,11 @@ pub enum EngineChoice {
     Ocrs,
     /// The installed `tesseract` binary, as an external process.
     Tesseract,
-    /// Ensemble: the default engine first, the other one as a secondary when available.
+    /// Ensemble: the best reader for the language first, the other one as a secondary when
+    /// available.
     Auto,
+    /// PaddleOCR through its ONNX models; Thai only (off the web build).
+    Paddle,
 }
 
 impl EngineChoice {
@@ -47,6 +53,7 @@ impl EngineChoice {
     pub fn parse(s: &str) -> EngineChoice {
         match s.trim().to_ascii_lowercase().as_str() {
             "tesseract" => EngineChoice::Tesseract,
+            "paddle" | "paddleocr" | "paddle-ocr" => EngineChoice::Paddle,
             "auto" | "automatic" | "ensemble" => EngineChoice::Auto,
             _ => EngineChoice::Ocrs,
         }
@@ -58,7 +65,7 @@ impl EngineChoice {
     pub fn default_strategy(self) -> MergeStrategy {
         match self {
             EngineChoice::Auto => MergeStrategy::ConfidenceWeighted,
-            EngineChoice::Ocrs | EngineChoice::Tesseract => MergeStrategy::PrimaryOnly,
+            EngineChoice::Ocrs | EngineChoice::Tesseract | EngineChoice::Paddle => MergeStrategy::PrimaryOnly,
         }
     }
 
@@ -68,6 +75,7 @@ impl EngineChoice {
             EngineChoice::Ocrs => "ocrs",
             EngineChoice::Tesseract => "tesseract",
             EngineChoice::Auto => "auto",
+            EngineChoice::Paddle => "paddle",
         }
     }
 }
@@ -256,8 +264,39 @@ pub struct Recognizers {
     pub secondary: Option<Arc<dyn Recognizer>>,
 }
 
+#[derive(Default)]
 struct EngineCache {
     ocrs: Option<Arc<dyn Recognizer>>,
+    /// The PaddleOCR probe. Loaded on first use, like ocrs's; Thai is the only language it
+    /// reads, so a job in another language never pays the load. A failed load is remembered
+    /// too: re-reading a corrupt model on every job only repeats the same error.
+    paddle: Option<PaddleProbe>,
+}
+
+/// What the PaddleOCR probe found. "The models are not installed" and "the models are there
+/// but cannot be loaded" are different answers: the first is fixed by fetching them, the
+/// second by replacing a broken file, and the second must show the real error rather than
+/// sending the user to a command that would find the files already in place.
+#[derive(Clone)]
+enum PaddleProbe {
+    /// Loaded and ready to read.
+    Ready(Arc<dyn Recognizer>),
+    /// No model set was found (`PaddleRecognizer::find`'s [`OcrError::NoModels`]).
+    Missing,
+    /// The files exist but loading failed (a corrupt or mismatched ONNX file, an unsupported
+    /// operator, an unreadable dictionary): the recogniser's own error text.
+    LoadFailed(String),
+}
+
+/// Turn a load attempt into a probe. Only "no models found" is the missing-models case; every
+/// other failure keeps its reason for the user.
+#[cfg(not(target_arch = "wasm32"))]
+fn paddle_probe(loaded: Result<pdfcraft_ocr::PaddleRecognizer, OcrError>) -> PaddleProbe {
+    match loaded {
+        Ok(r) => PaddleProbe::Ready(Arc::new(r)),
+        Err(OcrError::NoModels) => PaddleProbe::Missing,
+        Err(e) => PaddleProbe::LoadFailed(e.to_string()),
+    }
 }
 
 /// How long a negative engine probe (no program there) is remembered. A short TTL, not
@@ -417,6 +456,28 @@ fn models_installed_cached() -> bool {
     Models::find().is_some()
 }
 
+/// Whether the three PaddleOCR model files are installed, remembered like the ocrs models so
+/// per-frame UI checks do not search the disk.
+#[cfg(not(target_arch = "wasm32"))]
+fn paddle_models_installed_cached() -> bool {
+    static MODELS: Mutex<Option<(bool, Instant)>> = Mutex::new(None);
+    let mut slot = MODELS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((found, at)) = *slot
+        && probe_fresh(found, at, Instant::now())
+    {
+        return found;
+    }
+    let found = pdfcraft_ocr::PaddleModels::find().is_some();
+    *slot = Some((found, Instant::now()));
+    found
+}
+
+/// The web build never has the PaddleOCR models.
+#[cfg(target_arch = "wasm32")]
+fn paddle_models_installed_cached() -> bool {
+    false
+}
+
 /// The program's `--version` line, remembered per program path for the session (`ocr_status`
 /// asks every time it is called; the version of an installed binary does not change under a
 /// running app often enough to start a process each time).
@@ -539,13 +600,13 @@ fn needs_tesseract(name: &str, _code: &str) -> String {
 }
 
 /// The engine selector: builds each engine once and hands out the pair `settings.engine`
-/// asks for. "Automatic" is an ensemble when both engines are available; a named engine that
-/// cannot start fails with its cause named.
+/// asks for. "Automatic" is an ensemble when both engines for the language are available; a
+/// named engine that cannot start fails with its cause named.
 pub fn recognizers(settings: &OcrSettings) -> Result<Recognizers, String> {
-    // A language the built-in models cannot read (Thai) never reaches them: an explicit ocrs
-    // choice is refused by name, and Automatic makes Tesseract the primary (and only) reader
-    // instead of pairing it with a reader that would return Latin noise.
-    let non_latin = ocrs_cannot_read(&settings.language);
+    let language = settings.language.trim();
+    // PaddleOCR reads Thai, and is the more accurate Thai reader: it is the engine Automatic
+    // leads with there. Every other language never touches it.
+    let thai = language.eq_ignore_ascii_case("th");
     // The Tesseract probe (a `--list-langs` process) runs before any static mutex is taken, so
     // recognition on other threads is never blocked behind someone's discovery. A job that
     // names its engines never starts it: only Tesseract and Automatic read anything from it,
@@ -553,26 +614,75 @@ pub fn recognizers(settings: &OcrSettings) -> Result<Recognizers, String> {
     let configured = configured_tesseract(settings);
     let tesseract =
         if matches!(settings.engine, EngineChoice::Tesseract | EngineChoice::Auto) { tesseract_engine(configured.as_deref()) } else { None };
+    // A language the built-in models cannot read (Thai) never reaches them: an explicit ocrs
+    // choice is refused by name, and Automatic makes another reader the primary instead of
+    // pairing it with a reader that would return Latin noise.
     static ENGINES: Mutex<Option<EngineCache>> = Mutex::new(None);
     let mut slot = ENGINES.lock().unwrap_or_else(|e| e.into_inner());
-    let cache = slot.get_or_insert_with(|| EngineCache { ocrs: None });
+    let cache = slot.get_or_insert_with(EngineCache::default);
     if cache.ocrs.is_none() {
         // Cheap to re-attempt while the models are missing; expensive work is cached forever.
         cache.ocrs = pdfcraft_ocr::OcrsRecognizer::find().ok().map(|r| Arc::new(r) as Arc<dyn Recognizer>);
     }
+    // Loading a model is expensive, so it is attempted only for a choice that can use it and
+    // remembered for the session. A missing set is not remembered (the file check is cheap and
+    // the models may be installed while the app runs); a failed load is, with its reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    if thai && matches!(settings.engine, EngineChoice::Paddle | EngineChoice::Auto) && cache.paddle.is_none() {
+        match paddle_probe(pdfcraft_ocr::PaddleRecognizer::find()) {
+            PaddleProbe::Missing => {}
+            probe => cache.paddle = Some(probe),
+        }
+    }
     let ocrs = cache.ocrs.clone();
-    match settings.engine {
+    let paddle = cache.paddle.clone().unwrap_or(PaddleProbe::Missing);
+    drop(slot);
+    select(settings.engine, language, ocrs, tesseract, paddle)
+}
+
+/// Resolve a choice into the engines that read with it, from what is available. Pure, so the
+/// tests can hand it fake engines and pin every combination.
+fn select(
+    engine: EngineChoice,
+    language: &str,
+    ocrs: Option<Arc<dyn Recognizer>>,
+    tesseract: Option<Arc<dyn Recognizer>>,
+    paddle: PaddleProbe,
+) -> Result<Recognizers, String> {
+    let code = language.trim();
+    let thai = code.eq_ignore_ascii_case("th");
+    let non_latin = ocrs_cannot_read(code);
+    match engine {
         EngineChoice::Ocrs => {
             if let Some(name) = non_latin {
-                return Err(needs_tesseract(name, &settings.language));
+                return Err(needs_tesseract(name, code));
             }
             Ok(Recognizers { primary: ocrs.ok_or_else(models_missing)?, secondary: None })
         }
         EngineChoice::Tesseract => Ok(Recognizers { primary: tesseract.ok_or_else(tesseract_unavailable)?, secondary: None }),
-        EngineChoice::Auto => {
-            if let Some(name) = non_latin {
-                return tesseract.map(|p| Recognizers { primary: p, secondary: None }).ok_or_else(|| needs_tesseract(name, &settings.language));
+        EngineChoice::Paddle => {
+            if !thai {
+                return Err(paddle_reads_thai_only(language_name(code)));
             }
+            match paddle {
+                PaddleProbe::Ready(primary) => Ok(Recognizers { primary, secondary: None }),
+                PaddleProbe::Missing => Err(paddle_missing()),
+                PaddleProbe::LoadFailed(why) => Err(paddle_load_failed(&why)),
+            }
+        }
+        EngineChoice::Auto => {
+            if thai {
+                // PaddleOCR reads Thai more accurately, so it leads; Tesseract stays the
+                // second opinion. Without a working Paddle, Tesseract alone keeps Thai readable.
+                return match paddle {
+                    PaddleProbe::Ready(p) => Ok(Recognizers { primary: p, secondary: tesseract }),
+                    PaddleProbe::Missing | PaddleProbe::LoadFailed(_) => {
+                        tesseract.ok_or_else(|| needs_tesseract("Thai", code)).map(|p| Recognizers { primary: p, secondary: None })
+                    }
+                };
+            }
+            // PaddleOCR cannot read this language: Automatic never offers it here, whatever
+            // availability says.
             match (ocrs, tesseract) {
                 (Some(p), s) => Ok(Recognizers { primary: p, secondary: s }),
                 (None, Some(p)) => Ok(Recognizers { primary: p, secondary: None }),
@@ -580,6 +690,41 @@ pub fn recognizers(settings: &OcrSettings) -> Result<Recognizers, String> {
             }
         }
     }
+}
+
+/// The offered language's English name, or the code itself for one the app does not offer.
+fn language_name(code: &str) -> &str {
+    OFFERED_LANGUAGES.iter().find(|(c, _)| c.eq_ignore_ascii_case(code.trim())).map_or(code.trim(), |(_, name)| name)
+}
+
+/// Why PaddleOCR cannot read a language: it has only a Thai recognition model.
+fn paddle_reads_thai_only(name: &str) -> String {
+    format!("PaddleOCR reads Thai only, so it cannot read {name}; choose Tesseract for {name}")
+}
+
+/// Why the PaddleOCR models cannot run, naming the three files and the command that fetches
+/// them (the same wording as a missing installation of the app's own models).
+fn paddle_missing() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        format!(
+            "the Paddle Thai models are not installed ({}, {} and {}); run cargo xtask models to fetch them",
+            pdfcraft_ocr::PADDLE_DETECTION_MODEL,
+            pdfcraft_ocr::PADDLE_RECOGNITION_MODEL,
+            pdfcraft_ocr::PADDLE_DICT
+        )
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        "the PaddleOCR engine is not available in the web build".into()
+    }
+}
+
+/// Why the Paddle Thai engine cannot start even though its files are there: the load error
+/// itself (a corrupt or mismatched ONNX file, an unsupported operator, a dictionary that
+/// cannot be read), not the fetch command, which would find the files already in place.
+fn paddle_load_failed(why: &str) -> String {
+    format!("the Paddle Thai engine could not load its models: {why}")
 }
 
 /// Why Tesseract cannot run, named for the user.
@@ -621,6 +766,7 @@ pub fn available() -> bool {
 /// [`engine_probe_running`], to ask for another frame meanwhile).
 pub fn engine_unavailable_reason(engine: EngineChoice) -> Option<String> {
     let ocrs = models_installed_cached();
+    let paddle = paddle_models_installed_cached();
     #[cfg(not(target_arch = "wasm32"))]
     let tesseract = {
         let configured = std::env::var_os("PDFCRAFT_TESSERACT").map(|v| v.to_string_lossy().into_owned());
@@ -635,6 +781,7 @@ pub fn engine_unavailable_reason(engine: EngineChoice) -> Option<String> {
     match engine {
         EngineChoice::Ocrs => (!ocrs).then(models_missing),
         EngineChoice::Tesseract => tesseract.err(),
+        EngineChoice::Paddle => (!paddle).then(paddle_missing),
         EngineChoice::Auto => match (ocrs, tesseract) {
             (true, _) | (false, Ok(())) => None,
             (false, Err(why)) => Some(format!("{}; {why}", models_missing())),
@@ -1277,8 +1424,11 @@ mod tests {
         assert_eq!(EngineChoice::parse("tesseract"), EngineChoice::Tesseract);
         assert_eq!(EngineChoice::parse(" AUTO "), EngineChoice::Auto);
         assert_eq!(EngineChoice::parse("ocrs"), EngineChoice::Ocrs);
+        assert_eq!(EngineChoice::parse(" Paddle "), EngineChoice::Paddle);
+        assert_eq!(EngineChoice::parse("paddleocr"), EngineChoice::Paddle);
         assert_eq!(EngineChoice::parse("wat"), EngineChoice::Ocrs, "unknown names fall back to the default");
         assert_eq!(EngineChoice::default().name(), "ocrs");
+        assert_eq!(EngineChoice::Paddle.name(), "paddle", "the name settings and tools persist round-trips");
     }
 
     /// Automatic reads with the second engine when the first is unsure unless a strategy was
@@ -1614,9 +1764,102 @@ mod tests {
         }
         let automatic = OcrSettings { language: "th".into(), engine: EngineChoice::Auto, ..Default::default() };
         match recognizers(&automatic) {
-            Ok(r) => assert_eq!(r.primary.id(), "tesseract", "Automatic hands Thai to Tesseract"),
-            Err(why) => assert!(why.contains("Thai"), "no Tesseract here, named as such: {why}"),
+            // PaddleOCR (when its models are installed) or Tesseract: never the Latin-only
+            // ocrs engine.
+            Ok(r) => assert_ne!(r.primary.id(), "ocrs", "Automatic never hands Thai to the Latin-only reader"),
+            Err(why) => assert!(why.contains("Thai"), "no reader here, named as such: {why}"),
         }
+    }
+
+    /// The refusal message of a selection that must fail (Recognizers has no Debug, so
+    /// `unwrap_err` cannot be used).
+    fn refusal(result: Result<Recognizers, String>) -> String {
+        match result {
+            Ok(r) => panic!("expected a refusal, got {}", r.primary.id()),
+            Err(why) => why,
+        }
+    }
+
+    /// Automatic leads Thai with PaddleOCR — the more accurate Thai reader — and keeps
+    /// Tesseract as the second opinion; without PaddleOCR, Tesseract alone reads Thai. Pure:
+    /// the availability is handed in, no model or process is touched.
+    #[test]
+    fn paddle_is_the_primary_thai_reader_when_auto() {
+        let engine = |id: &'static str| Some(Arc::new(Fake::named(id)) as Arc<dyn Recognizer>);
+        let paddle = |id: &'static str| PaddleProbe::Ready(Arc::new(Fake::named(id)));
+        let both = select(EngineChoice::Auto, "th", engine("ocrs"), engine("tesseract"), paddle("paddle")).unwrap();
+        assert_eq!(both.primary.id(), "paddle", "PaddleOCR leads Thai");
+        assert_eq!(both.secondary.as_deref().map(|r| r.id()), Some("tesseract"), "Tesseract stays the second opinion");
+        // PaddleOCR's models missing: Tesseract alone, still without the Latin-only reader.
+        let only_tesseract = select(EngineChoice::Auto, "th", engine("ocrs"), engine("tesseract"), PaddleProbe::Missing).unwrap();
+        assert_eq!(only_tesseract.primary.id(), "tesseract");
+        assert!(only_tesseract.secondary.is_none(), "no second reader is invented");
+        // A broken Paddle install is no better for Automatic than a missing one: it must not
+        // become the primary reader.
+        let broken = select(EngineChoice::Auto, "th", engine("ocrs"), engine("tesseract"), PaddleProbe::LoadFailed("junk".into())).unwrap();
+        assert_eq!(broken.primary.id(), "tesseract", "a failed Paddle load falls back to Tesseract");
+        // Neither can read Thai: the existing refusal.
+        let none = refusal(select(EngineChoice::Auto, "th", engine("ocrs"), None, PaddleProbe::Missing));
+        assert!(none.contains("Thai") && none.contains("Tesseract"), "{none}");
+    }
+
+    /// An explicit PaddleOCR choice for Thai without its models is an honest error naming the
+    /// three files and the command that fetches them.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_explicit_paddle_choice_without_models_names_them() {
+        let why = refusal(select(EngineChoice::Paddle, "th", None, None, PaddleProbe::Missing));
+        assert!(why.contains("Paddle Thai models are not installed"), "{why}");
+        assert!(why.contains("cargo xtask models"), "{why}");
+        for file in ["paddle-text-detection.onnx", "paddle-thai-recognition.onnx", "paddle-thai-dict.txt"] {
+            assert!(why.contains(file), "{file} is named: {why}");
+        }
+    }
+
+    /// The models exist but cannot be read: the refusal is the load error itself, never the
+    /// "run cargo xtask models" instruction, which would find the files already in place.
+    /// Forced with junk bytes where the detector belongs, through the same conversion the
+    /// probe uses.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_corrupt_paddle_model_reports_the_load_error_not_the_fetch_command() {
+        let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-corrupt-paddle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let detection = dir.join(pdfcraft_ocr::PADDLE_DETECTION_MODEL);
+        std::fs::write(&detection, b"this is not an ONNX model").unwrap();
+        let recognition = dir.join(pdfcraft_ocr::PADDLE_RECOGNITION_MODEL);
+        std::fs::write(&recognition, b"this is not an ONNX model either").unwrap();
+        let dict = dir.join(pdfcraft_ocr::PADDLE_DICT);
+        std::fs::write(&dict, "a\nb\n").unwrap();
+        let models = pdfcraft_ocr::PaddleModels { detection, recognition, dict };
+        let probe = paddle_probe(pdfcraft_ocr::PaddleRecognizer::load(&models));
+        assert!(matches!(probe, PaddleProbe::LoadFailed(_)), "junk bytes are a load failure");
+        let why = refusal(select(EngineChoice::Paddle, "th", None, None, probe));
+        assert!(why.contains("could not load its models"), "{why}");
+        assert!(!why.contains("cargo xtask models"), "the files are there, so fetching them is not the remedy: {why}");
+        assert!(!why.contains("are not installed"), "{why}");
+        assert!(why.contains(pdfcraft_ocr::PADDLE_DETECTION_MODEL), "the real error names the file: {why}");
+        let _ = std::fs::remove_dir_all(&dir);
+        // The control: no model set at all is still the missing-models answer.
+        let missing = paddle_probe(Err(OcrError::NoModels));
+        let why = refusal(select(EngineChoice::Paddle, "th", None, None, missing));
+        assert!(why.contains("are not installed") && why.contains("cargo xtask models"), "{why}");
+    }
+
+    /// PaddleOCR has only a Thai recognition model: an explicit choice for another language is
+    /// refused by name, and Automatic never offers it there even when it is installed.
+    #[test]
+    fn paddle_is_refused_for_a_non_thai_language() {
+        let engine = |id: &'static str| Some(Arc::new(Fake::named(id)) as Arc<dyn Recognizer>);
+        let paddle = |id: &'static str| PaddleProbe::Ready(Arc::new(Fake::named(id)));
+        let why = refusal(select(EngineChoice::Paddle, "en", engine("ocrs"), engine("tesseract"), paddle("paddle")));
+        assert!(why.contains("Thai only") && why.contains("English"), "{why}");
+        let auto = select(EngineChoice::Auto, "en", engine("ocrs"), engine("tesseract"), paddle("paddle")).unwrap();
+        assert_eq!(auto.primary.id(), "ocrs", "Automatic uses ocrs for English");
+        assert_eq!(auto.secondary.as_deref().map(|r| r.id()), Some("tesseract"));
+        // An offered language beyond Thai gets its own name; an unknown code keeps its spelling.
+        assert!(refusal(select(EngineChoice::Paddle, "ja", None, None, paddle("paddle"))).contains("Japanese"));
+        assert!(refusal(select(EngineChoice::Paddle, "xx", None, None, paddle("paddle"))).contains("xx"));
     }
 
     /// An ocrs-only choice never starts the Tesseract probe: the probe is a `--list-langs`
@@ -1652,14 +1895,19 @@ mod tests {
     }
 
     /// A fake engine for the batch skip logic: reads one confident word from anything, counts
-    /// its calls, and never touches the filesystem.
+    /// its calls, and never touches the filesystem. `named` lets a selection test tell the
+    /// engines apart by id.
     struct Fake {
         calls: std::sync::atomic::AtomicUsize,
+        id: &'static str,
     }
 
     impl Fake {
         fn new() -> Fake {
-            Fake { calls: std::sync::atomic::AtomicUsize::new(0) }
+            Fake::named("fake")
+        }
+        fn named(id: &'static str) -> Fake {
+            Fake { calls: std::sync::atomic::AtomicUsize::new(0), id }
         }
         fn calls(&self) -> usize {
             self.calls.load(std::sync::atomic::Ordering::SeqCst)
@@ -1668,7 +1916,7 @@ mod tests {
 
     impl Recognizer for Fake {
         fn id(&self) -> &'static str {
-            "fake"
+            self.id
         }
         fn available(&self) -> bool {
             true

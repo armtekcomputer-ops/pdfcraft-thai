@@ -1,32 +1,36 @@
 # Thai OCR: benchmark corpus and reference notebook evaluation
 
 PdfCraft measures Thai OCR with a licence-clean corpus committed to this
-repository and the same Tesseract invocation the app issues. The mrolarik
-notebook below is retained only as a note on a route that was evaluated and not
-used: it has no licence and teaches no technique.
+repository, scoring the app's two offline Thai readers: the built-in PaddleOCR
+engine and the Tesseract invocation the app issues when Tesseract is chosen. The
+mrolarik notebook below is retained only as a note on a route that was evaluated
+and not used: it has no licence and teaches no technique.
 
 ## The benchmark corpus
 
 `tests/data/thai_ocr/` holds six pages of the Thai translation of the **ASEAN
 Charter** (PDF pages 3–8), paired with proofread transcriptions:
 
-| Page | Reference characters | Edits | CER |
-|---|---:|---:|---:|
-| `page-03.png` | 847 | 10 | 1.18% |
-| `page-04.png` | 522 | 6 | 1.15% |
-| `page-05.png` | 776 | 17 | 2.19% |
-| `page-06.png` | 831 | 18 | 2.17% |
-| `page-07.png` | 696 | 27 | 3.88% |
-| `page-08.png` | 527 | 11 | 2.09% |
-| **total** | **4,199** | **89** | **2.12%** |
+| Page | Reference characters | Paddle edits | Paddle CER | Tesseract edits | Tesseract CER |
+|---|---:|---:|---:|---:|---:|
+| `page-03.png` | 847 | 4 | 0.47% | 10 | 1.18% |
+| `page-04.png` | 522 | 1 | 0.19% | 6 | 1.15% |
+| `page-05.png` | 776 | 8 | 1.03% | 17 | 2.19% |
+| `page-06.png` | 831 | 9 | 1.08% | 18 | 2.17% |
+| `page-07.png` | 696 | 1 | 0.14% | 27 | 3.88% |
+| `page-08.png` | 527 | 4 | 0.76% | 11 | 2.09% |
+| **total** | **4,199** | **27** | **0.64%** | **89** | **2.12%** |
 
-Measured 2026-11-07 on this machine; the command reported
-`PASS (total CER 2.12% <= target 10.00%)`.
+Measured 2026-11-08 on this machine with `cargo xtask ocr-bench --engine paddle`
+and `cargo xtask ocr-bench --engine tesseract`; both runs reported
+`PASS (total CER 0.64% <= target 10.00%)` and
+`PASS (total CER 2.12% <= target 10.00%)` respectively.
 
 Page 04 was the hardest page of the earlier three-page trial that motivated the
 corpus. That trial predates the current pipeline, and its number is not
-reproducible with the command below, so it is not repeated here; in the
-six-page run every page is now under 4%, and page 04 is 1.15%.
+reproducible with the commands below, so it is not repeated here; in the
+six-page run every page is under 4% with Tesseract and under 1.1% with Paddle,
+and page 04 is 1.15% with Tesseract and 0.19% with Paddle.
 
 ### Rasterisation
 
@@ -70,13 +74,17 @@ U+0E48 on page 6 is the only correction.
 ## Running the benchmark
 
 ```sh
-cargo xtask ocr-bench                 # tests/data/thai_ocr, target 10%
-cargo xtask ocr-bench --target 5      # a stricter pass mark
-cargo xtask ocr-bench path/to/pages   # another PNG + sibling .txt corpus
+cargo xtask ocr-bench --engine paddle     # the built-in PaddleOCR reader
+cargo xtask ocr-bench --engine tesseract  # comparison against Tesseract
+cargo xtask ocr-bench --target 5          # a stricter pass mark
+cargo xtask ocr-bench path/to/pages       # another PNG + sibling .txt corpus
 ```
 
-For every `*.png` with a sibling `*.txt` of the same stem, the command runs the
-app's invocation:
+For every `*.png` with a sibling `*.txt` of the same stem, the chosen engine
+reads the page.
+
+`--engine tesseract` (the default, and the behaviour before the flag existed)
+runs the app's invocation:
 
 ```
 tesseract <page.png> stdout -l tha+eng -c tessedit_create_tsv=1
@@ -84,18 +92,29 @@ tesseract <page.png> stdout -l tha+eng -c tessedit_create_tsv=1
 
 with `TESSDATA_PREFIX` pointing at the bundled `assets/models/tessdata` when
 that directory exists (the caller's environment is otherwise left alone). It
-joins the level-5 words of the TSV with spaces, normalises both sides, computes
-the Levenshtein distance in characters, and prints a per-page and a total
-character error rate. The total sums the edits and the reference lengths before
-dividing, so long pages weigh more. It exits non-zero when the total exceeds
-`--target` (default 10%), and prints `skipped` when `tesseract` is not
-installed.
+joins the level-5 words of the TSV with spaces.
+
+`--engine paddle` measures the app's own `pdfcraft_ocr::paddle` engine without
+linking it into xtask: it builds a one-page PDF from the PNG and drives
+`pdfcraft-cli run --script` through `doc_create`, `ocr_recognize` (`language`
+`th`, `engine` `paddle`) and `doc_export_text`, then scores the exported text
+exactly like the Tesseract path. The CLI is `$PDFCRAFT_CLI` or
+`target/debug/pdfcraft-cli`; when the program, its paddle engine or the three
+models under `assets/models` are missing the command prints a `skipped` line and
+exits zero, like a missing `tesseract`.
+
+Each engine's output is normalised, its Levenshtein distance to the transcript is
+computed in characters, and the command prints a per-page and a total character
+error rate. The total sums the edits and the reference lengths before dividing,
+so long pages weigh more. It exits non-zero when the total exceeds `--target`
+(default 10%).
 
 ### What the metric folds
 
 - **Whitespace is ignored on both sides** after normalisation. Thai does not
-  space every word, and Tesseract reports each cluster as a word, so joining
-  with spaces would invent boundaries; spacing choices cost nothing.
+  space every word, and an engine may report each cluster or each line as a
+  "word", so joining with spaces would invent boundaries; spacing choices cost
+  nothing.
 - **NFKC is applied to both sides.** It folds Thai SARA AM (U+0E33) into
   NIKHAHIT (U+0E4D) plus SARA AA (U+0E32), which is what the recogniser emits,
   so pre-composed and decomposed spellings of the same word compare equal.
