@@ -182,7 +182,9 @@ update the numbers.
   browser; scanner input.
 - **Evidence:** `ocr.ocr-languages` partial ("the models read only the Latin alphabet without
   accents"); 19 of 26 OCR features planned; [#744](https://github.com/storytold/pdfcraft/issues/744)
-  (Dutch). Acrobat ships on-device recognition for dozens of languages.
+  (Dutch). Acrobat ships on-device recognition for dozens of languages. Thai now reads through the
+  Tesseract engine with the `tha` pack (`tesseract-ocr-tha`; Apache-2.0 `tha.traineddata` from
+  `tessdata_fast`), not through the `ocrs` models.
 - **Impact:** scanned documents are a core Pro workflow outside English.
 - **Estimate:** 40–75 h, partly blocked on openly licensed models. **Doc:**
   [file-format-parity.md](file-format-parity.md).

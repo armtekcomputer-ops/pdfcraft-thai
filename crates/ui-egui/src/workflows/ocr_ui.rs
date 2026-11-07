@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use egui::{Align, Layout};
 use pdfcraft_engine::DocId;
-use pdfcraft_engine::ocr::{EngineChoice, LANGUAGES, MergeStrategy, OcrPage, OcrSettings, OutputMode};
+use pdfcraft_engine::ocr::{EngineChoice, MergeStrategy, OFFERED_LANGUAGES, OcrPage, OcrSettings, OutputMode};
 
 use crate::theme::{self, Tokens};
 use crate::{PdfCraftApp, widgets};
@@ -102,7 +102,7 @@ impl OcrDraft {
     /// Restore from the preferences JSON (`ocr` object); unknown or malformed values keep the
     /// defaults, like every other restored setting.
     pub fn apply_pref(&mut self, v: &serde_json::Value) {
-        if let Some(l) = v["language"].as_str().filter(|l| LANGUAGES.iter().any(|x| x.0 == *l)) {
+        if let Some(l) = v["language"].as_str().filter(|l| OFFERED_LANGUAGES.iter().any(|x| x.0 == *l)) {
             self.language = l.to_string();
         }
         if let Some(e) = v["engine"].as_str() {
@@ -255,9 +255,9 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     group(ui, "Settings", &mut |ui| {
         egui::Grid::new("ocr-settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label(tl!("Document language"));
-            let name = LANGUAGES.iter().find(|l| l.0 == d.language).map_or("English", |l| l.1);
+            let name = OFFERED_LANGUAGES.iter().find(|l| l.0 == d.language).map_or("English", |l| l.1);
             craft_ui::ComboBox::from_id_salt("ocr-language").selected_text(tl!(name)).width(220.0).show_ui(ui, |ui| {
-                for (code, name) in LANGUAGES {
+                for (code, name) in OFFERED_LANGUAGES {
                     ui.selectable_value(&mut d.language, (*code).to_string(), tl!(*name));
                 }
             });

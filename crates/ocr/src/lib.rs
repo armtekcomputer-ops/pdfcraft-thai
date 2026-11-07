@@ -15,8 +15,9 @@
 //! display fonts. WinAnsi-only invisible text keeps the standard Helvetica layout here.
 //!
 //! The ocrs models read the Latin alphabet (English and other languages written without
-//! accents); Tesseract (the `tesseract` module, off the web build) reads whatever its installed
-//! language packs cover.
+//! accents); Thai is not among them. Tesseract (the `tesseract` module, off the web build) reads
+//! whatever its installed language packs cover, and serves every language in
+//! [`OFFERED_LANGUAGES`], Thai included.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -42,6 +43,26 @@ pub const MAX_SIDE: u32 = 10_000;
 /// multiply out to a raster no engine should have to read; larger images are rejected with
 /// [`OcrError::ImageTooLarge`] instead of being processed.
 pub const MAX_PIXELS: u32 = 64_000_000;
+
+/// The languages the app offers through Tesseract, as `(code, name)` pairs: the codes and
+/// English names the settings dropdown shows (the `tesseract::LANGUAGE_NAMES` table), Thai
+/// included. The ocrs engine reads only [`LANGUAGES`] (English); Tesseract reads every language
+/// here whose installed language pack covers it.
+pub const OFFERED_LANGUAGES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("de", "German"),
+    ("fr", "French"),
+    ("es", "Spanish"),
+    ("it", "Italian"),
+    ("pt", "Portuguese"),
+    ("ru", "Russian"),
+    ("zh", "Chinese (Simplified)"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("ar", "Arabic"),
+    ("nl", "Dutch"),
+    ("th", "Thai"),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum OcrError {
@@ -469,6 +490,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn offered_languages_include_thai() {
+        assert!(OFFERED_LANGUAGES.contains(&("th", "Thai")), "{OFFERED_LANGUAGES:?}");
+        assert_eq!(OFFERED_LANGUAGES.len(), 13, "{OFFERED_LANGUAGES:?}");
+        let mut codes: Vec<&str> = OFFERED_LANGUAGES.iter().map(|&(code, _)| code).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), OFFERED_LANGUAGES.len(), "duplicate codes in {OFFERED_LANGUAGES:?}");
+    }
+
+    #[test]
     fn places_words_through_the_mapping() {
         // 2 pixels per point, page 612 × 792, y flipped.
         let to_user = |x: f32, y: f32| [x as f64 / 2.0, 792.0 - y as f64 / 2.0];
@@ -889,6 +920,39 @@ mod tests {
                 }
             }
             (w, h, px)
+        }
+
+        /// A Thai line is drawn from clusters that Tesseract reports one by one: they must join
+        /// without spaces, or copy, search and the user dictionary read "ส ว ั ส ด ี".
+        #[test]
+        fn thai_clusters_join_without_spaces() {
+            use crate::{Line, Word};
+            let line = Line {
+                words: vec![Word::new("สวัสดี", [0.0, 0.0, 40.0, 20.0], "tesseract"), Word::new("ครับ", [41.0, 0.0, 70.0, 20.0], "tesseract")],
+            };
+            assert_eq!(line.text(), "สวัสดีครับ");
+        }
+
+        /// A real space in the scan (a wide gap) is kept: Thai does use spaces between phrases.
+        #[test]
+        fn a_wide_gap_between_thai_words_keeps_its_space() {
+            use crate::{Line, Word};
+            let line = Line {
+                words: vec![Word::new("ภาษา", [0.0, 0.0, 40.0, 20.0], "tesseract"), Word::new("ไทย", [70.0, 0.0, 100.0, 20.0], "tesseract")],
+            };
+            assert_eq!(line.text(), "ภาษา ไทย");
+        }
+
+        /// Latin words keep the space the recogniser dropped, including beside Thai text.
+        #[test]
+        fn latin_words_keep_their_spaces() {
+            use crate::{Line, Word};
+            let line = Line { words: vec![Word::new("hello", [0.0, 0.0, 40.0, 20.0], "ocrs"), Word::new("world", [45.0, 0.0, 85.0, 20.0], "ocrs")] };
+            assert_eq!(line.text(), "hello world");
+            let mixed = Line {
+                words: vec![Word::new("OCR", [0.0, 0.0, 40.0, 20.0], "tesseract"), Word::new("ทดสอบ", [45.0, 0.0, 85.0, 20.0], "tesseract")],
+            };
+            assert_eq!(mixed.text(), "OCR ทดสอบ", "a Latin word and a Thai one stay apart");
         }
     }
 }

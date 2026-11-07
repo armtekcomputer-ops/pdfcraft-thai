@@ -101,7 +101,7 @@ features total).
 |---|---|---|---|
 | Searchable image (invisible text layer) | yes | yes (Tr 3 text fitted to word boxes) | good for English |
 | Editable text and images output | yes | no | none |
-| Languages | dozens (Latin with accents, Cyrillic, Greek, CJK, Arabic, Hebrew, Indic) | Latin without accents only (ocrs models) | **basic** (#744) |
+| Languages | dozens (Latin with accents, Cyrillic, Greek, CJK, Arabic, Hebrew, Indic) | Latin without accents only (ocrs models); Thai via Tesseract (`tha`) | **basic** (#744) |
 | Deskew, rotation, despeckle, background and halo removal, descreen | yes | no | none |
 | Camera images (edges, perspective, whiteboard, card) | yes | no | none |
 | MRC (adaptive) compression, PDF/A output of scans | yes | no | none |

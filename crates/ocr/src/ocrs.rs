@@ -26,7 +26,9 @@ fn checked_len(width: u32, height: u32) -> Result<usize, OcrError> {
     pixels.checked_mul(4).ok_or(OcrError::ImageTooLarge)
 }
 
-/// The languages the models read (ISO 639-1); all use the Latin alphabet without accents.
+/// The languages the built-in ocrs models read (ISO 639-1); all use the Latin alphabet without
+/// accents. Thai is not read here: it is offered through the Tesseract engine (see
+/// [`OFFERED_LANGUAGES`](crate::OFFERED_LANGUAGES)).
 pub const LANGUAGES: &[(&str, &str)] = &[("en", "English")];
 
 /// The model files, as named in ATTRIBUTION.toml.

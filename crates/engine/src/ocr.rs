@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use pdfcraft_render::{PageInfo, PageRenderer, RenderConfig, RenderRequest, RequestKind};
 
 pub use pdfcraft_ocr::{
-    ConfidenceBand, LANGUAGES, MergeStrategy, Models, Ocr, OcrError, PlacedWord, Recognizer, band_for, is_suspect, low_confidence,
+    ConfidenceBand, LANGUAGES, MergeStrategy, Models, OFFERED_LANGUAGES, Ocr, OcrError, PlacedWord, Recognizer, band_for, is_suspect, low_confidence,
 };
 
 use crate::{DocId, Edit, EditError, Session};
@@ -106,7 +106,9 @@ impl OutputMode {
 pub struct OcrSettings {
     /// Resolution pages are rendered at for recognition (Acrobat's "Downsample to" choices).
     pub dpi: f32,
-    /// Language code from [`LANGUAGES`] (the models read the Latin alphabet, whatever this says).
+    /// Language code from [`OFFERED_LANGUAGES`]. The built-in ocrs engine reads only
+    /// [`LANGUAGES`] (the Latin alphabet): another offered language, Thai included, needs the
+    /// Tesseract engine and is refused rather than silently read as English.
     pub language: String,
     /// Leave pages that already have text alone (Acrobat reports "page contains renderable
     /// text" and skips them). When `false`, such pages are read too (a picture on a page that
@@ -500,10 +502,36 @@ fn configured_tesseract(settings: &OcrSettings) -> Option<String> {
     settings.tesseract_path.clone().or_else(|| std::env::var_os("PDFCRAFT_TESSERACT").map(|v| v.to_string_lossy().into_owned()))
 }
 
+/// The English name of an offered language the built-in ocrs models cannot read, `None` when
+/// they can (or when the code is not one the app offers). ocrs reads [`LANGUAGES`] — the Latin
+/// alphabet — so Thai and the rest of [`OFFERED_LANGUAGES`] must go to Tesseract: a language is
+/// never silently passed to a reader that cannot read it.
+fn ocrs_cannot_read(language: &str) -> Option<&'static str> {
+    let code = language.trim();
+    let (_, name) = OFFERED_LANGUAGES.iter().find(|(c, _)| c.eq_ignore_ascii_case(code))?;
+    (!LANGUAGES.iter().any(|(c, _)| c.eq_ignore_ascii_case(code))).then_some(*name)
+}
+
+/// Why a language needs Tesseract, named for the user (and the language pack to install).
+#[cfg(not(target_arch = "wasm32"))]
+fn needs_tesseract(name: &str, code: &str) -> String {
+    format!("{name} needs the Tesseract engine; install tesseract with the {} language pack", pdfcraft_ocr::tesseract::language_code(code))
+}
+
+/// Why a language needs Tesseract, named for the user (the web build has no processes).
+#[cfg(target_arch = "wasm32")]
+fn needs_tesseract(name: &str, _code: &str) -> String {
+    format!("{name} needs the Tesseract engine, which is not available in the web build")
+}
+
 /// The engine selector: builds each engine once and hands out the pair `settings.engine`
 /// asks for. "Automatic" is an ensemble when both engines are available; a named engine that
 /// cannot start fails with its cause named.
 pub fn recognizers(settings: &OcrSettings) -> Result<Recognizers, String> {
+    // A language the built-in models cannot read (Thai) never reaches them: an explicit ocrs
+    // choice is refused by name, and Automatic makes Tesseract the primary (and only) reader
+    // instead of pairing it with a reader that would return Latin noise.
+    let non_latin = ocrs_cannot_read(&settings.language);
     // The Tesseract probe (a `--list-langs` process) runs before any static mutex is taken, so
     // recognition on other threads is never blocked behind someone's discovery. A job that
     // names its engines never starts it: only Tesseract and Automatic read anything from it,
@@ -520,13 +548,23 @@ pub fn recognizers(settings: &OcrSettings) -> Result<Recognizers, String> {
     }
     let ocrs = cache.ocrs.clone();
     match settings.engine {
-        EngineChoice::Ocrs => Ok(Recognizers { primary: ocrs.ok_or_else(models_missing)?, secondary: None }),
+        EngineChoice::Ocrs => {
+            if let Some(name) = non_latin {
+                return Err(needs_tesseract(name, &settings.language));
+            }
+            Ok(Recognizers { primary: ocrs.ok_or_else(models_missing)?, secondary: None })
+        }
         EngineChoice::Tesseract => Ok(Recognizers { primary: tesseract.ok_or_else(tesseract_unavailable)?, secondary: None }),
-        EngineChoice::Auto => match (ocrs, tesseract) {
-            (Some(p), s) => Ok(Recognizers { primary: p, secondary: s }),
-            (None, Some(p)) => Ok(Recognizers { primary: p, secondary: None }),
-            (None, None) => Err(models_missing()),
-        },
+        EngineChoice::Auto => {
+            if let Some(name) = non_latin {
+                return tesseract.map(|p| Recognizers { primary: p, secondary: None }).ok_or_else(|| needs_tesseract(name, &settings.language));
+            }
+            match (ocrs, tesseract) {
+                (Some(p), s) => Ok(Recognizers { primary: p, secondary: s }),
+                (None, Some(p)) => Ok(Recognizers { primary: p, secondary: None }),
+                (None, None) => Err(models_missing()),
+            }
+        }
     }
 }
 
@@ -1467,6 +1505,32 @@ mod tests {
         match recognizers(&ocrs) {
             Ok(r) => assert_eq!(r.primary.id(), "ocrs"),
             Err(e) => assert!(e.contains("models"), "{e}"),
+        }
+    }
+
+    /// Thai is offered, but the built-in ocrs models read only the Latin alphabet: a Thai job
+    /// that names ocrs is refused with the Tesseract remedy rather than being read as English.
+    /// The refusal needs neither the models nor a Tesseract program, and Automatic never pairs
+    /// Thai with ocrs either.
+    #[test]
+    fn thai_with_the_ocrs_engine_never_reaches_the_latin_only_reader() {
+        assert_eq!(ocrs_cannot_read("th"), Some("Thai"));
+        assert_eq!(ocrs_cannot_read(" TH "), Some("Thai"), "trimmed, case-insensitive");
+        assert_eq!(ocrs_cannot_read("en"), None, "English is read by the built-in models");
+        assert_eq!(ocrs_cannot_read("klingon"), None, "a code the app does not offer keeps the old fallback");
+        let thai = OcrSettings { language: "th".into(), engine: EngineChoice::Ocrs, ..Default::default() };
+        match recognizers(&thai) {
+            Ok(_) => panic!("Thai must not reach the ocrs engine"),
+            Err(why) => {
+                assert!(why.contains("Thai") && why.contains("Tesseract"), "{why}");
+                #[cfg(not(target_arch = "wasm32"))]
+                assert!(why.contains("tha"), "names the language pack to install: {why}");
+            }
+        }
+        let automatic = OcrSettings { language: "th".into(), engine: EngineChoice::Auto, ..Default::default() };
+        match recognizers(&automatic) {
+            Ok(r) => assert_eq!(r.primary.id(), "tesseract", "Automatic hands Thai to Tesseract"),
+            Err(why) => assert!(why.contains("Thai"), "no Tesseract here, named as such: {why}"),
         }
     }
 

@@ -41,6 +41,7 @@ pub const LANGUAGE_CODES: &[(&str, &str)] = &[
     ("ja", "jpn"),
     ("ko", "kor"),
     ("ar", "ara"),
+    ("th", "tha"),
     ("nl", "nld"),
 ];
 
@@ -57,6 +58,7 @@ pub const LANGUAGE_NAMES: &[(&str, &str)] = &[
     ("ja", "Japanese"),
     ("ko", "Korean"),
     ("ar", "Arabic"),
+    ("th", "Thai"),
     ("nl", "Dutch"),
 ];
 
