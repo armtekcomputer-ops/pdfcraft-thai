@@ -216,9 +216,10 @@
 
     <!-- OCR models (#103), with their licences and ATTRIBUTION.txt, in models\ beside pdfcraft.exe
          where the app looks for them: every file `cargo xtask models` fetched (package.ps1), one
-         component each, so new models ship without naming them here. -->
+         component each, so new models ship without naming them here. `**` so the recursion reaches
+         models\tessdata\, where the Tesseract language data lands. -->
     <ComponentGroup Id="PdfcraftModels" Directory="ModelsFolder">
-      <Files Include="$(var.ModelsDir)\*" />
+      <Files Include="$(var.ModelsDir)\**" />
     </ComponentGroup>
   </Fragment>
 </Wix>

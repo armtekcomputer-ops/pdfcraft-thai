@@ -278,6 +278,9 @@ try {
 foreach ($model in @('text-detection.onnx', 'text-recognition.onnx')) {
   Assert-Equal (@($modelFiles | Where-Object { $_ -ceq $model }).Count) 1 "OCR model $model in models\"
 }
+# Tesseract language data lands in models\tessdata\, so the Files harvest must recurse into it.
+$tessFile = Read-Row 'SELECT `FileName` FROM `File` WHERE `FileName` LIKE ''%tha.traineddata''' 1
+Assert-Equal (($tessFile[0] -split '\|')[-1]) 'tha.traineddata' 'Thai Tesseract data in models\tessdata\'
 $rm = Read-Row 'SELECT `Dialog` FROM `Dialog` WHERE `Dialog` = ''MsiRMFilesInUse''' 1
 Assert-Equal $rm[0] 'MsiRMFilesInUse' 'Files-in-use dialog'
 [void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($Database)

@@ -321,13 +321,23 @@ pub fn fetch_all(m: &Manifest, dir: &Path, kind: &str) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dir)?;
     let mut out = Vec::new();
     for f in m.fetched.iter().filter(|f| f.kind == kind) {
-        let path = dir.join(&f.file);
+        let path = destination(dir, &f.file);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         fetch_verified(&f.url, &path, &f.sha256)?;
-        let licence = dir.join(format!("{}.LICENCE.txt", f.file));
+        let licence = path.with_file_name(format!("{}.LICENCE.txt", f.file));
         fetch_verified(&f.licence_url, &licence, &f.licence_sha256)?;
         out.push(path);
     }
     Ok(out)
+}
+
+/// Where a fetched file lands under `dir`: Tesseract only reads language data from a `tessdata`
+/// directory it is pointed at, so `*.traineddata` go to `<dir>/tessdata/`; every other file stays
+/// flat in `<dir>`. A licence fetched with a file sits beside it either way.
+pub(crate) fn destination(dir: &Path, file: &str) -> PathBuf {
+    if file.ends_with(".traineddata") { dir.join("tessdata").join(file) } else { dir.join(file) }
 }
 
 fn fetch_verified(url: &str, path: &Path, sha256: &str) -> Result<()> {
@@ -350,7 +360,9 @@ fn fetch_verified(url: &str, path: &Path, sha256: &str) -> Result<()> {
 }
 
 /// `cargo xtask models [DIR]`: fetch the OCR models (`kind = "model"`) into `assets/models/` (git-ignored),
-/// where the app and tests look for them. Each comes with its licence (`<file>.LICENCE.txt`), and
+/// where the app and tests look for them. Tesseract language data (`*.traineddata`) goes into
+/// `assets/models/tessdata/`, the directory Tesseract is pointed at; every other model stays flat in
+/// `assets/models/`. Each comes with its licence (`<file>.LICENCE.txt`) beside it, and
 /// `ATTRIBUTION.txt` credits them all, so the release packages can ship the directory as it is.
 pub fn models(args: &[String]) -> Result<()> {
     let root = root();
@@ -365,7 +377,10 @@ pub fn models(args: &[String]) -> Result<()> {
 
 /// The credits shipped beside the models (their licences require attribution).
 fn models_attribution(m: &Manifest) -> String {
-    let mut s = String::from("PdfCraft's text recognition (Scan & OCR) uses these models, unmodified.\n");
+    let mut s = String::from(
+        "PdfCraft's text recognition (Scan & OCR) uses these models, unmodified.\n\
+         Tesseract language data (`*.traineddata`) is installed in `tessdata/`; each model's licence sits beside it.\n",
+    );
     for f in m.fetched.iter().filter(|f| f.kind == "model") {
         let _ = write!(
             s,
@@ -415,7 +430,7 @@ pub fn render_markdown(m: &Manifest) -> String {
         );
     }
     s.push_str(&format!(
-        "\n## Downloaded at build time ({})\n\nFonts are fetched by `cargo xtask demo-pdf` into `target/demo-fonts/`, OCR models by `cargo xtask models` into `assets/models/`; each is verified by SHA-256 and never committed.\n\n| File | Title | Author | Licence | Source | Used for |\n|---|---|---|---|---|---|\n",
+        "\n## Downloaded at build time ({})\n\nFonts are fetched by `cargo xtask demo-pdf` into `target/demo-fonts/`, OCR models by `cargo xtask models` into `assets/models/` (Tesseract language data into `assets/models/tessdata/`); each is verified by SHA-256 and never committed.\n\n| File | Title | Author | Licence | Source | Used for |\n|---|---|---|---|---|---|\n",
         m.fetched.len()
     ));
     for f in &m.fetched {
@@ -456,6 +471,15 @@ mod tests {
         for f in models {
             assert!(text.contains(&f.file) && text.contains(&f.author) && text.contains(&f.licence), "{}", f.file);
         }
+    }
+
+    /// Tesseract reads language packs only from a tessdata directory (#103): `.traineddata` go there,
+    /// every other model stays flat in the directory the app scans.
+    #[test]
+    fn traineddata_goes_into_tessdata_and_other_models_stay_flat() {
+        let dir = Path::new("assets/models");
+        assert_eq!(destination(dir, "tha.traineddata"), dir.join("tessdata/tha.traineddata"));
+        assert_eq!(destination(dir, "text-detection.onnx"), dir.join("text-detection.onnx"));
     }
 
     fn asset(path: &str, author: &str, kind: &str, licence: &str) -> Asset {

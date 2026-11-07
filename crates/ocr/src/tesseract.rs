@@ -69,6 +69,13 @@ pub fn language_code(code: &str) -> &'static str {
     LANGUAGE_CODES.iter().find(|(k, _)| *k == c).map(|(_, v)| *v).unwrap_or("eng")
 }
 
+/// Tesseract's `-l` value for an allow-listed language. Thai is read together with the Latin
+/// pack when it is available: Thai documents carry English words, acronyms and digits, and the
+/// Thai data alone reads `OCR` as `068`. Any other language is asked for exactly as mapped.
+pub fn language_argument(primary: &'static str, latin: bool) -> String {
+    if primary == "tha" && latin { "tha+eng".to_string() } else { primary.to_string() }
+}
+
 /// The user-configured program location, when valid: `$PDFCRAFT_TESSERACT` (a user
 /// preference, never taken from document data). An invalid value — relative, missing, a
 /// directory, not executable — means unavailable: an explicit setting is never silently
@@ -144,6 +151,104 @@ fn program_is_executable(program: &Path) -> bool {
     {
         true
     }
+}
+
+/// The tessdata directory a language pack is bundled in, if any: the value of
+/// `$PDFCRAFT_TESSDATA` when it holds a pack, else the copy the installer ships next to the
+/// program, else the source-tree `assets/models/tessdata` of a development build. `None` when
+/// nothing on this machine carries a pack, so an installed Tesseract's own prefix stands.
+pub(crate) fn bundled_tessdata(exe_dir: Option<&Path>, manifest_dir: Option<&Path>) -> Option<PathBuf> {
+    let configured = std::env::var_os("PDFCRAFT_TESSDATA");
+    bundled_tessdata_with(configured.as_deref().map(Path::new), exe_dir, manifest_dir)
+}
+
+/// [`bundled_tessdata`] with the explicit override passed in, so tests never touch the process
+/// environment. Candidates are tried in a fixed order and the first directory that actually
+/// holds a `*.traineddata` file wins; a directory without one is skipped rather than trusted
+/// (Tesseract would fail every recognition with an empty prefix).
+pub(crate) fn bundled_tessdata_with(override_dir: Option<&Path>, exe_dir: Option<&Path>, manifest_dir: Option<&Path>) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = override_dir {
+        candidates.push(dir.to_path_buf());
+    }
+    if let Some(dir) = exe_dir {
+        // The bundled layouts, in the order an installer lays them out: beside the program
+        // (Linux/Windows), inside the macOS app bundle, then the shared data directory.
+        candidates.push(dir.join("models").join("tessdata"));
+        candidates.push(dir.join("..").join("Resources").join("models").join("tessdata"));
+        candidates.push(dir.join("..").join("share").join("pdfcraft").join("models").join("tessdata"));
+    }
+    if let Some(dir) = manifest_dir {
+        // A development build: `crates/ocr` is two levels below the repository root.
+        candidates.push(dir.join("..").join("..").join("assets").join("models").join("tessdata"));
+    }
+    candidates.into_iter().find(|dir| has_traineddata(dir))
+}
+
+/// Whether `dir` holds at least one `*.traineddata` file: a real pack, not an empty directory
+/// (a missing or unreadable directory is simply not a pack).
+fn has_traineddata(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    entries.flatten().any(|entry| {
+        entry.file_type().is_ok_and(|kind| kind.is_file()) && entry.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".traineddata")
+    })
+}
+
+/// The language packs of `dir` as `(code, name)` pairs, in [`LANGUAGE_CODES`] order: a pack the
+/// bundle ships is offered even when the installed Tesseract's own `tessdata` lacks it.
+fn bundled_languages(dir: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut found: Vec<&str> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            name.strip_suffix(".traineddata").map(str::to_string)
+        })
+        .map(|stem| LANGUAGE_CODES.iter().find(|(_, tess)| *tess == stem).map(|(_, tess)| *tess).unwrap_or(""))
+        .filter(|tess| !tess.is_empty())
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (code, tess) in LANGUAGE_CODES {
+        if found.contains(tess) {
+            let name = LANGUAGE_NAMES.iter().find(|(k, _)| k == code).map(|(_, n)| (*n).to_string()).unwrap_or_else(|| (*code).to_string());
+            out.push(((*code).to_string(), name));
+        }
+    }
+    out
+}
+
+/// The languages after a `-l` flag in `args`, lowercased and split on `+` (`tha+eng` asks for
+/// both). `None` when the run names no language (for example `--list-langs` or `--version`).
+fn asked_languages(args: &[&str]) -> Option<Vec<String>> {
+    let at = args.iter().position(|a| *a == "-l")?;
+    let value = args.get(at + 1)?;
+    Some(value.split('+').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect())
+}
+
+/// Whether `dir` carries the pack of every asked language. The bundled prefix is only used when
+/// it can serve the whole request: pointing Tesseract at a bundle that holds Thai alone would
+/// make an `-l eng` run fail even where the machine's own `tessdata` has English.
+fn covers(dir: &Path, asked: &[String]) -> bool {
+    !asked.is_empty() && asked.iter().all(|lang| dir.join(format!("{lang}.traineddata")).is_file())
+}
+
+/// Whether the installed Tesseract already reads every asked language. A language the system
+/// has is left to the system: its data may be newer, and only a missing one needs the bundle.
+fn installed_reads(installed: &[(String, String)], asked: &[String]) -> bool {
+    asked.iter().all(|tess| LANGUAGE_CODES.iter().any(|(code, name)| name == tess && installed.iter().any(|(c, _)| c == code)))
+}
+
+/// Whether `tess` (a Tesseract data name such as `eng`) can be read: the installed program lists
+/// its language, or the bundled tessdata carries the pack.
+fn has_pack(engine: &TesseractCli, tess: &str) -> bool {
+    let installed = engine.langs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if installed_reads(&installed, &[tess.to_string()]) {
+        return true;
+    }
+    let exe_dir = engine.program.parent().filter(|d| !d.as_os_str().is_empty());
+    bundled_tessdata(exe_dir, option_env!("CARGO_MANIFEST_DIR").map(Path::new)).is_some_and(|dir| dir.join(format!("{tess}.traineddata")).is_file())
 }
 
 /// One row of Tesseract's TSV output. `level` 5 rows are the words; `conf` is −1 on the header
@@ -345,24 +450,39 @@ impl TesseractCli {
         // Known limit: only the direct child is killed at the timeout or on an early cap. A
         // wrapper script's children (grandchildren of this process) may survive the kill; the
         // cap and the timeout still bound what this run reads and how long it waits.
-        let mut child =
-            std::process::Command::new(&self.program)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(out_file)
-                .stderr(err_file)
-                .current_dir(&dir.path)
-                // A minimal environment: nothing from the document or the caller's shell beyond
-                // what an installed tesseract needs — its data prefix, the PATH (bare-name lookup
-                // and DLL loading), the Windows system root, and a temp dir it may write to.
-                .env_clear()
-                .envs(std::env::vars().filter(|(k, _)| {
+        let mut cmd = std::process::Command::new(&self.program);
+        cmd.args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(out_file)
+            .stderr(err_file)
+            .current_dir(&dir.path)
+            // A minimal environment: nothing from the document or the caller's shell beyond
+            // what an installed tesseract needs — its data prefix, the PATH (bare-name lookup
+            // and DLL loading), the Windows system root, and a temp dir it may write to. The
+            // data prefix is the caller's `TESSDATA_PREFIX` when they set one, else the pack
+            // `$PDFCRAFT_TESSDATA` names or the bundled copy (a user's own setting wins).
+            .env_clear()
+            .envs(
+                std::env::vars().filter(|(k, _)| {
                     k.eq_ignore_ascii_case("TESSDATA_PREFIX") || k.eq_ignore_ascii_case("PATH") || k.eq_ignore_ascii_case("SystemRoot")
-                }))
-                .env("TMP", &dir.path)
-                .env("TEMP", &dir.path)
-                .spawn()
-                .map_err(|e| OcrError::NoTesseract(format!("{} could not start: {e}", self.program.display())))?;
+                }),
+            )
+            .env("TMP", &dir.path)
+            .env("TEMP", &dir.path);
+        // A bundled pack is invisible to the child's cleared environment, so point Tesseract at
+        // it — unless the caller's own prefix is already there (their setting decides), or the
+        // bundle cannot serve the languages this run asks for (then the machine's own prefix,
+        // which the child still inherits, is the better answer).
+        let exe_dir = self.program.parent().filter(|d| !d.as_os_str().is_empty());
+        let asked = asked_languages(args);
+        let installed = self.langs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if std::env::var_os("TESSDATA_PREFIX").is_none()
+            && let Some(tessdata) = bundled_tessdata(exe_dir, option_env!("CARGO_MANIFEST_DIR").map(Path::new))
+            && asked.as_deref().is_some_and(|langs| covers(&tessdata, langs) && !installed_reads(&installed, langs))
+        {
+            cmd.env("TESSDATA_PREFIX", tessdata);
+        }
+        let mut child = cmd.spawn().map_err(|e| OcrError::NoTesseract(format!("{} could not start: {e}", self.program.display())))?;
         let started = Instant::now();
         let status = loop {
             match child.try_wait() {
@@ -454,17 +574,30 @@ impl Recognizer for TesseractCli {
         if self.probed.load(Ordering::Relaxed) == 2 {
             return Vec::new();
         }
-        let langs = self.langs.lock().unwrap_or_else(|e| e.into_inner());
-        if langs.is_empty() {
-            drop(langs);
-            return self.refresh().map_or(Vec::new(), |()| self.langs.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        let cached = self.langs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut langs = if cached.is_empty() {
+            self.refresh().map_or(Vec::new(), |()| self.langs.lock().unwrap_or_else(|e| e.into_inner()).clone())
+        } else {
+            cached
+        };
+        // The bundle's packs are offered beside the installed ones: a machine whose own
+        // `tessdata` has no Thai can still pick it, and the UI list never hides a shipped pack.
+        if self.probed.load(Ordering::Relaxed) == 1 {
+            let exe_dir = self.program.parent().filter(|d| !d.as_os_str().is_empty());
+            if let Some(dir) = bundled_tessdata(exe_dir, option_env!("CARGO_MANIFEST_DIR").map(Path::new)) {
+                for (code, name) in bundled_languages(&dir) {
+                    if !langs.iter().any(|(c, _)| *c == code) {
+                        langs.push((code, name));
+                    }
+                }
+            }
         }
-        langs.clone()
+        langs
     }
 
     /// Write the page as a PNG and read it back as TSV.
     fn recognize(&self, image: &OcrImage, options: &RecognizeOptions) -> Result<Vec<Line>, OcrError> {
-        let lang = language_code(&options.language);
+        let lang = language_argument(language_code(&options.language), has_pack(self, "eng"));
         let png = encode_png(image)?;
         let dir = TempDir::create()?;
         let png_path = dir.path.join("page.png");
@@ -473,8 +606,12 @@ impl Recognizer for TesseractCli {
             set_private(&mut f);
             f.write_all(&png).map_err(|e| OcrError::Process(format!("writing the image failed: {e}")))?;
         }
-        // Fixed argv, no shell: tesseract <png> stdout -l <lang> tsv.
-        let tsv = self.run(&[&png_path.to_string_lossy(), "stdout", "-l", lang, "tsv"], self.timeout, self.max_output)?;
+        // Fixed argv, no shell: tesseract <png> stdout -l <lang> -c tessedit_create_tsv=1.
+        // The TSV writer is requested as a parameter rather than the `tsv` config file: a
+        // bundled `TESSDATA_PREFIX` replaces the installed tree, and without its `configs/`
+        // directory the config-name form silently prints plain text instead.
+        let tsv =
+            self.run(&[&png_path.to_string_lossy(), "stdout", "-l", lang.as_str(), "-c", "tessedit_create_tsv=1"], self.timeout, self.max_output)?;
         let (lines, truncated) = parse_tsv_bounded(&tsv);
         if truncated {
             return Err(OcrError::Recognize(format!("the {MAX_WORDS}-word limit was exceeded; the incomplete reading was rejected")));
@@ -688,6 +825,31 @@ mod tests {
         }
     }
 
+    /// Thai is allow-listed with Tesseract's `tha` data name, and the two tables stay aligned:
+    /// a code without a name (or a name without a code) would desync dropdowns and lookups.
+    #[test]
+    fn thai_maps_to_tha_and_unknown_falls_back() {
+        assert_eq!(language_code("th"), "tha");
+        assert_eq!(language_code(" TH "), "tha", "trimmed, case-insensitive");
+        assert_eq!(language_code("xx"), "eng", "unknown → eng");
+        assert_eq!(LANGUAGE_CODES.len(), LANGUAGE_NAMES.len(), "one name per code");
+        for ((code, tess), (named, _)) in LANGUAGE_CODES.iter().zip(LANGUAGE_NAMES) {
+            assert_eq!(code, named, "both tables list the same codes in the same order");
+            assert_eq!(language_code(code), *tess);
+        }
+    }
+
+    /// Thai is read with the Latin pack beside it when that pack exists, so English words and
+    /// digits on the same page survive (Thai data alone reads `OCR` as `068`). Other languages
+    /// ask for exactly their own pack, and a Thai-only install still works.
+    #[test]
+    fn thai_is_read_with_the_latin_pack_when_it_is_available() {
+        assert_eq!(language_argument("tha", true), "tha+eng");
+        assert_eq!(language_argument("tha", false), "tha");
+        assert_eq!(language_argument("eng", true), "eng");
+        assert_eq!(language_argument("deu", true), "deu");
+    }
+
     #[test]
     fn list_langs_come_from_stderr_when_stdout_has_none() {
         let listing = "List of available languages in \"/usr/share/tessdata/\" (2):\neng\nosd\n";
@@ -871,7 +1033,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The child runs with a minimal environment (its data prefix, the PATH, the Windows
+    /// The child runs with a minimal environment (its data prefix — its own `TESSDATA_PREFIX`,
+    /// or the pack `$PDFCRAFT_TESSDATA` names or the bundled copy — the PATH, the Windows
     /// system root, and a temp dir), never the caller's whole environ. This is checked with a
     /// script that prints its own environ as the "TSV" (Unix only).
     #[cfg(unix)]
@@ -959,6 +1122,113 @@ mod tests {
         let none = path_search_in([PathBuf::from("relative/dir")].into_iter());
         assert_eq!(none, None, "only relative entries: nothing is found");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `$PDFCRAFT_TESSDATA` decides first, and only when it actually holds a pack: an empty
+    /// override falls through to the bundled copy instead of handing Tesseract a useless prefix.
+    #[test]
+    fn bundled_tessdata_prefers_the_explicit_override() {
+        let root = TempDir::create().unwrap();
+        let override_dir = root.path.join("override");
+        let exe = root.path.join("app");
+        let bundled = exe.join("models").join("tessdata");
+        for dir in [&override_dir, &bundled] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("tha.traineddata"), b"pack").unwrap();
+        }
+        assert_eq!(bundled_tessdata_with(Some(&override_dir), Some(&exe), None), Some(override_dir.clone()), "the explicit override wins");
+        std::fs::remove_file(override_dir.join("tha.traineddata")).unwrap();
+        assert_eq!(
+            bundled_tessdata_with(Some(&override_dir), Some(&exe), None),
+            Some(bundled.clone()),
+            "an override without a pack is skipped, so the bundled copy is used"
+        );
+    }
+
+    /// A directory with no `*.traineddata` in it is not a pack: the search continues to the
+    /// next candidate (here the macOS app-bundle layout).
+    #[test]
+    fn bundled_tessdata_skips_a_directory_without_a_pack() {
+        let root = TempDir::create().unwrap();
+        let exe = root.path.join("app");
+        let empty = exe.join("models").join("tessdata");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(empty.join("readme.txt"), b"no pack here").unwrap();
+        let resources = exe.join("..").join("Resources").join("models").join("tessdata");
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("tha.traineddata"), b"pack").unwrap();
+        assert_eq!(bundled_tessdata_with(None, Some(&exe), None), Some(resources.clone()));
+        assert!(!has_traineddata(&empty), "an empty directory is not a pack");
+    }
+
+    /// Nothing on this machine carries a pack: `None`, so an installed Tesseract's own prefix
+    /// is left alone. A source-tree build finds `assets/models/tessdata` two levels up.
+    #[test]
+    fn bundled_tessdata_is_none_when_nothing_exists() {
+        let root = TempDir::create().unwrap();
+        let exe = root.path.join("app");
+        let manifest = root.path.join("repo").join("crates").join("ocr");
+        std::fs::create_dir_all(&manifest).unwrap();
+        assert_eq!(bundled_tessdata_with(None, Some(&exe), Some(&manifest)), None);
+        let source = manifest.join("..").join("..").join("assets").join("models").join("tessdata");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("tha.traineddata"), b"pack").unwrap();
+        assert_eq!(bundled_tessdata_with(None, Some(&exe), Some(&manifest)), Some(source));
+    }
+
+    /// The `-l` value names the packs a run needs; `tha+eng` asks for both, and a run without
+    /// `-l` (`--list-langs`, `--version`) asks for none.
+    #[test]
+    fn asked_languages_reads_the_l_flag() {
+        assert_eq!(asked_languages(&["page.png", "stdout", "-l", "tha", "tsv"]), Some(vec!["tha".to_string()]));
+        assert_eq!(asked_languages(&["page.png", "stdout", "-l", " THA+eng ", "tsv"]), Some(vec!["tha".to_string(), "eng".to_string()]));
+        assert_eq!(asked_languages(&["--list-langs"]), None);
+        assert_eq!(asked_languages(&["--version"]), None);
+    }
+
+    /// A bundle holding Thai alone must not be forced on an `-l eng` run: the machine's own
+    /// `tessdata` may have English, and pointing Tesseract at the bundle would fail the run.
+    /// Once the bundle carries every asked pack, it is used, including offline-only installs.
+    #[test]
+    fn the_bundle_is_used_only_when_it_covers_every_asked_language() {
+        let root = TempDir::create().unwrap();
+        let dir = root.path.clone();
+        std::fs::write(dir.join("tha.traineddata"), b"pack").unwrap();
+        assert!(covers(&dir, &["tha".to_string()]));
+        assert!(!covers(&dir, &["eng".to_string()]), "Thai alone cannot serve an English run");
+        assert!(!covers(&dir, &["tha".to_string(), "eng".to_string()]), "mixed runs need both packs");
+        assert!(!covers(&dir, &[]), "an empty request covers nothing");
+        std::fs::write(dir.join("eng.traineddata"), b"pack").unwrap();
+        assert!(covers(&dir, &["tha".to_string(), "eng".to_string()]), "both packs are present now");
+    }
+
+    /// A language the installed Tesseract already reads is left to it — its data may be newer —
+    /// and only a missing one makes the bundle the prefix. Codes are the app's, not tessdata's.
+    #[test]
+    fn only_a_missing_language_makes_the_bundle_the_prefix() {
+        let installed = vec![("en".to_string(), "English".to_string())];
+        assert!(installed_reads(&installed, &["eng".to_string()]));
+        assert!(!installed_reads(&installed, &["tha".to_string()]), "Thai is missing, so the bundle serves it");
+        assert!(!installed_reads(&installed, &["eng".to_string(), "tha".to_string()]), "one missing pack is enough");
+        let both = vec![("en".to_string(), "English".to_string()), ("th".to_string(), "Thai".to_string())];
+        assert!(installed_reads(&both, &["eng".to_string(), "tha".to_string()]));
+    }
+
+    /// Packs shipped in the bundle are listed beside the installed ones, by their app language
+    /// code and name, once each and in allow-list order.
+    #[test]
+    fn bundled_packs_are_listed_by_language_code() {
+        let root = TempDir::create().unwrap();
+        let dir = root.path.clone();
+        for file in ["tha.traineddata", "eng.traineddata", "xyz.traineddata"] {
+            std::fs::write(dir.join(file), b"pack").unwrap();
+        }
+        std::fs::write(dir.join("readme.txt"), b"not a pack").unwrap();
+        assert_eq!(
+            bundled_languages(&dir),
+            vec![("en".to_string(), "English".to_string()), ("th".to_string(), "Thai".to_string())],
+            "unknown packs are ignored and the order follows LANGUAGE_CODES"
+        );
     }
 
     /// "HELLO" as blocky 5×7 glyphs, 8 pixels per dot with wide tracking, at roughly 300 dpi

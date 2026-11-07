@@ -405,13 +405,20 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// The `kind = "model"` entries whose filenames `ocrs.rs` names. The Tesseract language
+    /// pack (`tha.traineddata`) is `kind = "model"` too, but no ocrs constant names it.
+    fn required_models<'a>(source: &str, attribution: &'a assets::Manifest) -> Vec<&'a assets::Fetched> {
+        attribution.fetched.iter().filter(|f| f.kind == "model" && source.contains(&format!("\"{}\"", f.file))).collect()
+    }
+
     #[test]
     fn required_ocr_models_cannot_be_missing() {
         let source = include_str!("../../crates/ocr/src/ocrs.rs");
         let original = assets::load(&assets::root()).unwrap();
-        assert_eq!(original.fetched.iter().filter(|f| f.kind == "model").count(), 2);
+        let models = required_models(source, &original);
+        assert_eq!(models.len(), 2, "the two ocrs models are required");
         assert!(check_required_ocr_metadata(source, &original).unwrap().is_empty());
-        for model in original.fetched.iter().filter(|f| f.kind == "model") {
+        for model in models {
             let mut m = assets::load(&assets::root()).unwrap();
             m.fetched.retain(|f| f.file != model.file);
             assert!(check_required_ocr_metadata(source, &m).unwrap().iter().any(|p| p.contains(&model.file) && p.contains("missing")));
@@ -422,8 +429,9 @@ mod tests {
     fn required_ocr_models_cannot_be_misclassified() {
         let source = include_str!("../../crates/ocr/src/ocrs.rs");
         let original = assets::load(&assets::root()).unwrap();
-        assert_eq!(original.fetched.iter().filter(|f| f.kind == "model").count(), 2);
-        for model in original.fetched.iter().filter(|f| f.kind == "model") {
+        let models = required_models(source, &original);
+        assert_eq!(models.len(), 2, "the two ocrs models are required");
+        for model in models {
             let mut m = assets::load(&assets::root()).unwrap();
             m.fetched.iter_mut().find(|f| f.file == model.file).unwrap().kind = "font".into();
             assert!(check_required_ocr_metadata(source, &m).unwrap().iter().any(|p| p.contains(&model.file) && p.contains("kind")));
