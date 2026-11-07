@@ -5818,6 +5818,61 @@ fn added_thai_text_wraps_clusters_and_survives_reopen() {
     assert!(arabic_font_names(&doc, 0).is_empty());
 }
 
+/// Thai wraps at the dictionary's word boundaries: a word that fits a line is never split, and
+/// every line boundary is one of the paragraph's `segment::words` offsets.
+#[test]
+fn thai_text_wraps_at_dictionary_word_boundaries() {
+    if pdfcraft_fonts::document_thai_font().is_none() {
+        eprintln!("skipping thai_text_wraps_at_dictionary_word_boundaries: this build has no Thai face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let para = "สวัสดีครับภาษาไทยการทดสอบ";
+    let t = AddedText { rect: [0.0, 0.0, 90.0, 200.0], text: para.into(), size: 16.0, ..AddedText::default() };
+    let width = (t.rect[2] - t.rect[0]).max(t.size);
+    let lines = super::added::lines(&t);
+    assert!(lines.len() > 1, "the paragraph should wrap: {lines:?}");
+    // The dictionary boundaries of the paragraph, as cumulative character counts.
+    let mut ends = std::collections::HashSet::new();
+    let mut at = 0usize;
+    for word in pdfcraft_fonts::segment::words(para) {
+        at += word.chars().count();
+        ends.insert(at);
+    }
+    assert_eq!(lines.concat(), para, "no text is reordered or lost");
+    let mut at = 0usize;
+    for line in &lines {
+        at += line.chars().count();
+        let line_width = super::added::text_width(&AddedText { text: line.clone(), ..t.clone() });
+        assert!(line_width <= width + 1e-9 || !ends.contains(&at), "line {line:?} is {line_width} wide, box {width}");
+        assert!(ends.contains(&at), "line boundary at {at} of {line:?} is not a dictionary word boundary");
+    }
+}
+
+/// A single word wider than the box is still broken, at cluster boundaries: every line is a
+/// contiguous slice of the paragraph, so nothing is reordered or lost.
+#[test]
+fn thai_word_wider_than_the_line_breaks_between_clusters() {
+    if pdfcraft_fonts::document_thai_font().is_none() {
+        eprintln!("skipping thai_word_wider_than_the_line_breaks_between_clusters: this build has no Thai face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    // One dictionary word (ICU4X does not split it), wider than the 16 pt box: only an
+    // emergency break may cut it, and it must stay between clusters.
+    let para = "วิทยาศาสตร์";
+    assert_eq!(pdfcraft_fonts::segment::words(para), vec![para], "the fixture must be a single dictionary word");
+    let t = AddedText { rect: [0.0, 0.0, 16.0, 200.0], text: para.into(), size: 16.0, ..AddedText::default() };
+    let lines = super::added::lines(&t);
+    assert!(lines.len() > 1, "one over-long word should still break: {lines:?}");
+    assert!(lines.iter().all(|line| line.chars().count() < para.chars().count()), "a line cannot hold the whole word: {lines:?}");
+    assert_eq!(lines.concat(), para, "no text is reordered or lost");
+    let mut start = 0usize;
+    for line in &lines {
+        let slice: String = para.chars().skip(start).take(line.chars().count()).collect();
+        assert_eq!(&slice, line, "line {line:?} is not a contiguous slice of the paragraph");
+        start += line.chars().count();
+    }
+}
+
 #[test]
 fn group_moves_preserve_glyph_bytes_and_unselected_text_state() {
     for content in [
@@ -10305,7 +10360,13 @@ fn a_reused_type3_face_never_replaces_a_later_page_s_font_of_the_same_name() {
     ]);
     let glyph = pdfcraft_fonts::GlyphOutline { contours: vec![vec![[0.1, 0.0], [0.9, 0.0], [0.5, 0.8]]], width: 1.0, bbox: [0.1, 0.0, 0.9, 0.8] };
     let mut plan = pdfcraft_fonts::TextPlan::default();
-    plan.fonts.push(pdfcraft_fonts::PlannedType3 { family: "Test", glyphs: vec![('日', glyph)], name: String::new(), object: None });
+    plan.fonts.push(pdfcraft_fonts::PlannedType3 {
+        family: "Test",
+        glyphs: vec![('日', glyph)],
+        offsets: vec![[0.0, 0.0]],
+        name: String::new(),
+        object: None,
+    });
     let draw = |p: &pdfcraft_fonts::TextPlan| format!("BT 3 Tr /{} 1 Tf 100 600 Td (\u{1}) Tj ET", p.fonts[0].name).into_bytes();
     stamp_with_fonts(&mut doc, 0, "OCR", &mut plan, draw).unwrap();
     assert_eq!(plan.fonts[0].name, "PCOcr", "free on page 1");

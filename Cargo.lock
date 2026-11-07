@@ -4493,6 +4493,7 @@ name = "pdfcraft-fonts"
 version = "0.18.1"
 dependencies = [
  "harfrust",
+ "icu_segmenter",
  "pdfcraft-cos",
  "skrifa 0.44.0",
  "unicode-bidi",
@@ -4547,7 +4548,6 @@ dependencies = [
 name = "pdfcraft-ocr"
 version = "0.18.1"
 dependencies = [
- "icu_segmenter",
  "ocrs",
  "pdfcraft-fonts",
  "png 0.18.1",

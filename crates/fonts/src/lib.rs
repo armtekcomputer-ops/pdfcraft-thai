@@ -16,6 +16,7 @@ pub mod fallback;
 pub mod pdf;
 pub mod plan;
 mod script;
+pub mod segment;
 mod shaping;
 pub mod source_shaping;
 mod std14;

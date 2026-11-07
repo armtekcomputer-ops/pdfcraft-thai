@@ -58,7 +58,9 @@ set). Without that variable `CRAFT_FONTS` is empty and everything below copes:
 - `ui_thai_fonts` / `document_thai_font` / `shape_thai`: the `Thai` faces for the interface
   and shaped Thai Add Text content. Harfrust positions stacked vowel/tone marks and decomposes
   Sara Am; cluster ToUnicode entries preserve the original text. The shared Type 3 writer
-  embeds outlines, so reopening does not depend on installed fonts.
+  embeds outlines, so reopening does not depend on installed fonts. Thai Add Text wraps at the
+  dictionary word boundaries from `segment::words`, splitting a word only when it alone is wider
+  than the box and then only between shaped clusters.
 - `craft_glyph(face, ch)` and `face_has(bytes, ch)`: bounded outlines and glyph coverage for any bundled face.
 - `SHIPPORI_MINCHO`: Shippori Mincho's bytes, or `None`.
 - `TextPlan::for_words`: how the OCR output writes text beyond WinAnsi — per word the first

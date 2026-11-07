@@ -73,8 +73,10 @@ pub(super) fn wrapped(t: &AddedText) -> Vec<(String, bool, usize)> {
     out
 }
 
-/// Thai wrapping at shaped cluster boundaries never detaches a tone/vowel mark from its base.
-/// This is glyph-safe wrapping, not dictionary-based Thai word segmentation.
+/// Thai wrapping at dictionary word boundaries: a line ends where the segmenter ends a word, so a
+/// word that fits a line is never split. The words are groups of shaped clusters, so a break never
+/// detaches a tone/vowel mark from its base. Only a word wider than the whole box is broken, at
+/// cluster boundaries, so one over-long word cannot loop or overflow.
 fn thai_lines(t: &AddedText, para: &str, width: f64) -> Result<Vec<String>, EditError> {
     let (pieces, _) = shaped_layout(t, para, false)?;
     let mut atoms = Vec::new();
@@ -88,17 +90,78 @@ fn thai_lines(t: &AddedText, para: &str, width: f64) -> Result<Vec<String>, Edit
             })),
         }
     }
+    // The cumulative character offsets where the segmenter ends a word are the allowed breaks.
+    // Direction controls steer the order and are not drawn, so the shaper's atoms never contain
+    // them: boundaries are counted on the same cleaned text, or every offset after one would
+    // drift by a character.
+    let clean: String = para.chars().filter(|c| !is_bidi_control(*c)).collect();
+    let total = clean.chars().count();
+    let mut ends = Vec::new();
+    let mut seen = 0usize;
+    for word in pdfcraft_fonts::segment::words(&clean) {
+        seen = seen.saturating_add(word.chars().count());
+        if seen > 0 && seen <= total {
+            ends.push(seen);
+        }
+    }
+    // Group the shaped clusters into those words, keeping each word's atoms and total advance.
+    let mut words: Vec<(Vec<(String, f64)>, f64)> = Vec::new();
+    let (mut word, mut word_w) = (Vec::new(), 0.0);
+    let (mut chars, mut next) = (0usize, 0usize);
+    for atom in atoms {
+        chars = chars.saturating_add(atom.0.chars().count());
+        word_w += atom.1;
+        word.push(atom);
+        // A boundary inside a shaped cluster cannot be used, so the cluster stays whole and the
+        // break moves to its end.
+        let mut cut = false;
+        while let Some(&end) = ends.get(next) {
+            if end < chars {
+                next += 1;
+            } else {
+                if end == chars {
+                    next += 1;
+                    cut = true;
+                }
+                break;
+            }
+        }
+        if cut {
+            words.push((std::mem::take(&mut word), std::mem::replace(&mut word_w, 0.0)));
+        }
+    }
+    if !word.is_empty() {
+        words.push((word, word_w));
+    }
+
     let mut lines = Vec::new();
     let (mut line, mut used) = (String::new(), 0.0);
-    for (text, advance) in atoms {
-        if !line.is_empty() && used + advance > width {
+    for (atoms, word_w) in words {
+        if !line.is_empty() && used + word_w > width {
             lines.push(std::mem::take(&mut line));
             used = 0.0;
         }
-        line.push_str(&text);
-        used += advance;
+        if word_w > width {
+            // Wider than any line: break it at cluster boundaries, the narrowest break shaping
+            // allows.
+            for (text, advance) in atoms {
+                if !line.is_empty() && used + advance > width {
+                    lines.push(std::mem::take(&mut line));
+                    used = 0.0;
+                }
+                line.push_str(&text);
+                used += advance;
+            }
+        } else {
+            for (text, advance) in atoms {
+                line.push_str(&text);
+                used += advance;
+            }
+        }
     }
-    lines.push(line);
+    if !line.is_empty() {
+        lines.push(line);
+    }
     Ok(lines)
 }
 

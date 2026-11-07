@@ -57,8 +57,11 @@ Rewrapped Chinese and Japanese text, which has no spaces between words, may brea
 two characters. A row never begins with closing punctuation, a closing bracket or quote, a small
 kana or the prolonged sound mark, and never ends with an opening bracket or quote or a currency
 sign before an amount: the line-start and line-end rules of JIS X 4051, as in Unicode line
-breaking (UAX #14). Latin words inside such text are not split. Korean and Thai still break only
-at spaces.
+breaking (UAX #14). Latin words inside such text are not split. Existing-text rewrap still breaks
+Korean and Thai only at spaces. Add Text is different for Thai: it wraps at the word boundaries
+the dictionary finds (`pdfcraft_fonts::segment`, ICU4X) and breaks inside a word only when that
+word alone is wider than the box, between shaped clusters so a mark stays with its base. Latin
+words inside Thai text keep their measured widths.
 
 Select text within the editor before changing size, colour, font, underline or spacing to
 format that selection. Automation supports up to 1024 disjoint UTF-8 byte ranges with the
