@@ -18,13 +18,13 @@
 | ตัดบรรทัดไทยตามขอบเขตคำ (Add Text) | `ecef5fc2` |
 | TIS-620/CP874 ทั้ง extraction และ renderer (vendored patch 76) | `0d72ad49` |
 | เปิด Thai UI: ตรวจพบว่า catalog มีแล้ว + เพิ่ม tests `thai_catalog_loads` และแก้ docs ที่ค้าง | `877e3a37` |
+| D6 accuracy corpus (public domain): ASEAN Charter 6 หน้า 200 dpi, 4,199 ตัวอักษร, CER 2.12% | `cargo xtask ocr-bench` |
 
 ### ยังไม่ปิด — ติดข้อจำกัดภายนอกหรือต้องคนไทยตรวจ
 | งาน | เหตุที่ยังทำไม่ได้ |
 |---|---|
 | C1 catalog ภาษาไทย | **มีอยู่แล้ว** ใน craft-i18n ที่ rev ที่ pin ไว้ (3,300 entries, 0 ช่องว่าง) — เปิดใช้ + เพิ่ม tests/docs แล้ว (`877e3a37`); เหลือ native review เท่านั้น |
 | A2 Thai Bold / A3 oblique | craft-fonts pin `b076417b` มีเฉพาะ Noto Sans Thai Regular |
-| D6 accuracy corpus จริง | ต้องใช้ scan ที่มีสิทธิ์ใช้ (ห้ามใช้รูปจาก mrolarik เพราะไม่มี license) |
 | D3 offline ONNX Thai | ยังไม่มีโมเดลที่ license เปิดและรันบน rten ได้; ใช้ tesseract `tha` แทน |
 | B3 justify / B5 PDF/UA tagging | ต่อยอดจาก segmentation ที่มีแล้ว แต่ยังไม่เริ่ม |
 | Edit text ไทย (ข้อความเดิมในหน้า) | ต้องออกแบบ cluster run splitting ใน `crates/edit` — งานใหญ่ |

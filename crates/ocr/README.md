@@ -120,3 +120,7 @@ bundled English data so the pair works offline. Other languages stay bounded by 
 whatever language packs the installed Tesseract has. Not yet: OCR in the browser (the tesseract
 module is compiled out for wasm32), the deep scan-cleanup options (descreen, background removal,
 edge-shadow removal), and editable glyph coverage beyond the available attributed faces.
+
+Thai accuracy is measured on the licence-clean six-page corpus in `tests/data/thai_ocr/` (ASEAN
+Charter, 200 dpi) with `cargo xtask ocr-bench`, which reports 2.12% total character error rate
+over 4,199 reference characters.

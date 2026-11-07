@@ -3182,6 +3182,72 @@ usage = "Signature validation tests (crates/sign/tests/it/pdf.rs): the legacy ad
 sha256 = "b77bfb21166f4bd043597e45a1ea28b9d9f4ba6df0142b3a0fc8b7f8e0fc111b"
 
 [[asset]]
+path = "tests/data/thai_ocr/page-03.png"
+title = "Thai OCR benchmark page 03 (ASEAN Charter, Thai translation)"
+author = "ASEAN Secretariat (Thai translation); Thai Wikisource contributors (transcription)"
+source = "https://th.wikisource.org/wiki/หน้า:ASEAN_Charter_Thai.pdf/3 (transcription, CC BY-SA 4.0, proofread level 3); original: https://commons.wikimedia.org/wiki/File:ASEAN_Charter_Thai.pdf (official treaty text); rasterised with pdftoppm -r 200 -gray"
+licence = "CC-BY-SA-4.0"
+licence_file = "tests/data/thai_ocr/LICENSE-CC-BY-SA-4.0.txt"
+kind = "data"
+usage = "cargo xtask ocr-bench: Thai OCR character-error-rate benchmark"
+sha256 = "50a5b593f1005efdd41ea4876ebb2401f5c2958deb87d6541c81c94b5eef953d"
+
+[[asset]]
+path = "tests/data/thai_ocr/page-04.png"
+title = "Thai OCR benchmark page 04 (ASEAN Charter, Thai translation)"
+author = "ASEAN Secretariat (Thai translation); Thai Wikisource contributors (transcription)"
+source = "https://th.wikisource.org/wiki/หน้า:ASEAN_Charter_Thai.pdf/4 (transcription, CC BY-SA 4.0, proofread level 3); original: https://commons.wikimedia.org/wiki/File:ASEAN_Charter_Thai.pdf (official treaty text); rasterised with pdftoppm -r 200 -gray"
+licence = "CC-BY-SA-4.0"
+licence_file = "tests/data/thai_ocr/LICENSE-CC-BY-SA-4.0.txt"
+kind = "data"
+usage = "cargo xtask ocr-bench: Thai OCR character-error-rate benchmark"
+sha256 = "d880d2e9f27549d8f1cb287c019e751d475a624c7831db1f87acfbad0865e25d"
+
+[[asset]]
+path = "tests/data/thai_ocr/page-05.png"
+title = "Thai OCR benchmark page 05 (ASEAN Charter, Thai translation)"
+author = "ASEAN Secretariat (Thai translation); Thai Wikisource contributors (transcription)"
+source = "https://th.wikisource.org/wiki/หน้า:ASEAN_Charter_Thai.pdf/5 (transcription, CC BY-SA 4.0, proofread level 3); original: https://commons.wikimedia.org/wiki/File:ASEAN_Charter_Thai.pdf (official treaty text); rasterised with pdftoppm -r 200 -gray"
+licence = "CC-BY-SA-4.0"
+licence_file = "tests/data/thai_ocr/LICENSE-CC-BY-SA-4.0.txt"
+kind = "data"
+usage = "cargo xtask ocr-bench: Thai OCR character-error-rate benchmark"
+sha256 = "c083c69d1932df9650ebf4e3117ff0fa772b69eaeed05c09bd283a6a08b44a73"
+
+[[asset]]
+path = "tests/data/thai_ocr/page-06.png"
+title = "Thai OCR benchmark page 06 (ASEAN Charter, Thai translation)"
+author = "ASEAN Secretariat (Thai translation); Thai Wikisource contributors (transcription)"
+source = "https://th.wikisource.org/wiki/หน้า:ASEAN_Charter_Thai.pdf/6 (transcription, CC BY-SA 4.0, proofread level 3); original: https://commons.wikimedia.org/wiki/File:ASEAN_Charter_Thai.pdf (official treaty text); rasterised with pdftoppm -r 200 -gray"
+licence = "CC-BY-SA-4.0"
+licence_file = "tests/data/thai_ocr/LICENSE-CC-BY-SA-4.0.txt"
+kind = "data"
+usage = "cargo xtask ocr-bench: Thai OCR character-error-rate benchmark"
+sha256 = "48ba91dba6f031365296ef306f906f61081ea9cdc29a06d1263750d4186f1ed4"
+
+[[asset]]
+path = "tests/data/thai_ocr/page-07.png"
+title = "Thai OCR benchmark page 07 (ASEAN Charter, Thai translation)"
+author = "ASEAN Secretariat (Thai translation); Thai Wikisource contributors (transcription)"
+source = "https://th.wikisource.org/wiki/หน้า:ASEAN_Charter_Thai.pdf/7 (transcription, CC BY-SA 4.0, proofread level 3); original: https://commons.wikimedia.org/wiki/File:ASEAN_Charter_Thai.pdf (official treaty text); rasterised with pdftoppm -r 200 -gray"
+licence = "CC-BY-SA-4.0"
+licence_file = "tests/data/thai_ocr/LICENSE-CC-BY-SA-4.0.txt"
+kind = "data"
+usage = "cargo xtask ocr-bench: Thai OCR character-error-rate benchmark"
+sha256 = "f5699743a80cb14b395ed3cfce6675370f394e02d04971b91371b5e74e57ae87"
+
+[[asset]]
+path = "tests/data/thai_ocr/page-08.png"
+title = "Thai OCR benchmark page 08 (ASEAN Charter, Thai translation)"
+author = "ASEAN Secretariat (Thai translation); Thai Wikisource contributors (transcription)"
+source = "https://th.wikisource.org/wiki/หน้า:ASEAN_Charter_Thai.pdf/8 (transcription, CC BY-SA 4.0, proofread level 3); original: https://commons.wikimedia.org/wiki/File:ASEAN_Charter_Thai.pdf (official treaty text); rasterised with pdftoppm -r 200 -gray"
+licence = "CC-BY-SA-4.0"
+licence_file = "tests/data/thai_ocr/LICENSE-CC-BY-SA-4.0.txt"
+kind = "data"
+usage = "cargo xtask ocr-bench: Thai OCR character-error-rate benchmark"
+sha256 = "969fdc2b76a3e16fa79234825a9c77e1d44b9222190eb871658dbd9ab09973e1"
+
+[[asset]]
 path = "assets/icons/monitor.svg"
 title = "Lucide icon \"monitor\""
 author = "Lucide Contributors (portions Cole Bemis, Feather)"
