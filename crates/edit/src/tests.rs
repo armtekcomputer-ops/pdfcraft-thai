@@ -5873,6 +5873,77 @@ fn thai_word_wider_than_the_line_breaks_between_clusters() {
     }
 }
 
+/// A justified Thai line has no spaces between its words: its stretchable gaps are its dictionary
+/// word boundaries, so the line still fills the box, with the extra advance between words.
+#[test]
+fn a_justified_thai_line_stretches_between_words() {
+    if pdfcraft_fonts::document_thai_font().is_none() {
+        eprintln!("skipping a_justified_thai_line_stretches_between_words: this build has no Thai face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let para = "ภาษาไทยและการทดสอบภาษาไทยและการทดสอบภาษาไทยและการทดสอบ";
+    let t = AddedText { rect: [72.0, 300.0, 372.0, 700.0], text: para.into(), size: 16.0, align: added::Align::Justify, ..AddedText::default() };
+    let width = 300.0;
+    let laid = super::added::lines(&t);
+    assert!(laid.len() >= 2, "the paragraph should wrap: {laid:?}");
+    for line in &laid[..laid.len() - 1] {
+        assert!(!line.contains(' '), "the fixture is Thai without spaces: {line:?}");
+        let gaps = super::added::stretch_gaps(line);
+        assert_eq!(gaps, pdfcraft_fonts::segment::words(line).len() - 1, "{line:?}");
+        let natural = super::added::text_width(&AddedText { text: line.clone(), ..t.clone() });
+        assert!(natural < width - 1.0, "{line:?} already fills {width}: {natural}");
+        let per_gap = (width - natural) / gaps as f64;
+        assert!(per_gap > 0.0, "{line:?} has no slack to stretch");
+        assert!((natural + per_gap * gaps as f64 - width).abs() < 1e-9, "{line:?}: the gaps fill the box");
+    }
+
+    let mut doc = fixture();
+    add_content(&mut doc, 0, &Content::Text(t)).unwrap();
+    let doc = reopen(&doc);
+    let lines = text::text_lines(&doc, 0).unwrap();
+    let thai: Vec<_> = lines.iter().filter(|l| l.text.chars().any(pdfcraft_fonts::segment::is_thai)).collect();
+    assert_eq!(thai.len(), laid.len(), "{thai:?}");
+    for (l, text) in thai.iter().zip(&laid) {
+        // The /ActualText keeps the typing order: no space was inserted between words.
+        assert_eq!(&l.text, text, "{l:?}");
+    }
+    for l in &thai[..thai.len() - 1] {
+        assert!((l.rect[2] - l.rect[0] - width).abs() < 0.5, "{:?} is {} wide, not {width}", l.text, l.rect[2] - l.rect[0]);
+    }
+    let last = thai[thai.len() - 1];
+    assert!(last.rect[2] - last.rect[0] < width - 1.0, "the paragraph's last line is not stretched: {:?}", last.rect);
+}
+
+/// A mixed Thai and Latin line counts its spaces and its Thai word boundaries once each: a
+/// dictionary boundary next to a space is that space's gap, not a second one.
+#[test]
+fn a_justified_mixed_line_does_not_double_count_spaces() {
+    if pdfcraft_fonts::document_thai_font().is_none() {
+        eprintln!("skipping a_justified_mixed_line_does_not_double_count_spaces: this build has no Thai face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let thai = "ภาษาไทย";
+    let internal = pdfcraft_fonts::segment::words(thai).len() - 1;
+    assert!(internal >= 1, "the fixture needs a Thai word boundary: {:?}", pdfcraft_fonts::segment::words(thai));
+    let line = format!("{thai} Hello world");
+    assert_eq!(super::added::stretch_gaps(&line), 2 + internal, "{line:?}: two spaces and {internal} inside the Thai run");
+    assert_eq!(super::added::thai_word_gaps(&line).len(), internal, "{line:?}: the boundaries at the spaces are not counted again");
+
+    // A Thai word facing a space adds no gap of its own, and neither does the space twice.
+    let single = "วิทยาศาสตร์ Hello world";
+    assert_eq!(pdfcraft_fonts::segment::words("วิทยาศาสตร์"), vec!["วิทยาศาสตร์"]);
+    assert_eq!(super::added::stretch_gaps(single), 2, "{single:?}");
+
+    // Every counted Thai gap sits between two drawn, non-space characters.
+    let chars: Vec<char> = line.chars().collect();
+    let gaps = super::added::thai_word_gaps(&line);
+    assert_eq!(gaps.len(), internal);
+    for g in gaps {
+        assert_ne!(chars[g - 1], ' ', "{line:?}: gap {g} is a space");
+        assert_ne!(chars[g], ' ', "{line:?}: gap {g} is a space");
+    }
+}
+
 #[test]
 fn group_moves_preserve_glyph_bytes_and_unselected_text_state() {
     for content in [

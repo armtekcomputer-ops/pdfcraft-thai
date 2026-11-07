@@ -73,6 +73,39 @@ pub(super) fn wrapped(t: &AddedText) -> Vec<(String, bool, usize)> {
     out
 }
 
+/// The gaps a justified line is stretched at: one after every space, and for a line with Thai one
+/// after every dictionary word boundary that a space does not already stretch. Thai writes words
+/// without spaces, so its word boundaries are the gaps; a space counts once, not again as the
+/// boundary on either side of it.
+pub(crate) fn stretch_gaps(line: &str) -> usize {
+    let clean: String = line.chars().filter(|c| !is_bidi_control(*c)).collect();
+    clean.matches(' ').count() + thai_word_gaps(&clean).len()
+}
+
+/// The character offsets where a justified line with Thai takes an extra advance: the end of each
+/// dictionary word inside the line, except where a space already does (a boundary next to a space
+/// is that space's gap). Offsets count characters of `line` without its bidi controls, which are
+/// not drawn, so they line up with the shaper's clusters.
+pub(crate) fn thai_word_gaps(line: &str) -> Vec<usize> {
+    let chars: Vec<char> = line.chars().filter(|c| !is_bidi_control(*c)).collect();
+    if !chars.iter().any(|c| is_thai(*c)) {
+        return Vec::new();
+    }
+    let clean: String = chars.iter().collect();
+    let total = chars.len();
+    let mut gaps = Vec::new();
+    let mut seen = 0usize;
+    for word in pdfcraft_fonts::segment::words(&clean) {
+        seen = seen.saturating_add(word.chars().count());
+        // A gap only inside the line, and only where no space already stretches it.
+        if seen == 0 || seen >= total || chars.get(seen - 1) == Some(&' ') || chars.get(seen) == Some(&' ') {
+            continue;
+        }
+        gaps.push(seen);
+    }
+    gaps
+}
+
 /// Thai wrapping at dictionary word boundaries: a line ends where the segmenter ends a word, so a
 /// word that fits a line is never split. The words are groups of shaped clusters, so a break never
 /// detaches a tone/vowel mark from its base. Only a word wider than the whole box is broken, at

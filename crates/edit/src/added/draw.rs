@@ -1,5 +1,6 @@
 use super::layout::{
-    Piece, arabic_error, hebrew_error, is_arabic, is_hebrew, is_thai, latin_width, norm, shaped_layout, text_rect, thai_error, wrapped,
+    Piece, arabic_error, hebrew_error, is_arabic, is_hebrew, is_thai, latin_width, norm, shaped_layout, stretch_gaps, text_rect, thai_error,
+    thai_word_gaps, wrapped,
 };
 use super::types::{AddedText, Align, Family};
 use super::{
@@ -19,17 +20,17 @@ pub(super) const GLYPHS_PER_FONT: usize = 240;
 /// its paragraph, its pieces in drawing order and its width at the item's size.
 pub(super) type LaidLine = (String, bool, usize, Vec<Piece>, f64);
 
-/// Where line `i` (`w` wide unstretched, with `spaces` spaces) starts in the box `r`, and its word
-/// spacing. `paragraphs` holds each line's paragraph: a line takes its paragraph's alignment, and
-/// every line of a justified paragraph but its last is stretched to the box's width.
-fn placed(t: &AddedText, r: [f64; 4], paragraphs: &[usize], i: usize, w: f64, spaces: usize, rtl: bool) -> (f64, f64) {
+/// Where line `i` (`w` wide unstretched, with `gaps` stretchable gaps) starts in the box `r`, and
+/// its word spacing. `paragraphs` holds each line's paragraph: a line takes its paragraph's
+/// alignment, and every line of a justified paragraph but its last is stretched to the box's width.
+fn placed(t: &AddedText, r: [f64; 4], paragraphs: &[usize], i: usize, w: f64, gaps: usize, rtl: bool) -> (f64, f64) {
     let paragraph = paragraphs.get(i).copied().unwrap_or(0);
     let align = t.paragraph_align(paragraph);
     let ends_paragraph = paragraphs.get(i + 1) != Some(&paragraph);
-    let tw = if align == Align::Justify && !ends_paragraph && spaces > 0 { ((r[2] - r[0]) - w).max(0.0) / spaces as f64 } else { 0.0 };
+    let tw = if align == Align::Justify && !ends_paragraph && gaps > 0 { ((r[2] - r[0]) - w).max(0.0) / gaps as f64 } else { 0.0 };
     let x = match align {
         // A right-to-left paragraph's unstretched last line ends at the right edge.
-        Align::Justify if rtl => r[2] - w - tw * spaces as f64,
+        Align::Justify if rtl => r[2] - w - tw * gaps as f64,
         Align::Left | Align::Justify => r[0],
         Align::Center => r[0] + ((r[2] - r[0]) - w) / 2.0,
         Align::Right => r[2] - w,
@@ -116,19 +117,51 @@ pub(super) fn draw_laid_shaped(
         // explicitly, including marks, ligatures, digits and mixed-script punctuation.
         let logical: String = line.encode_utf16().map(|u| format!("{u:04X}")).collect();
         out.extend(format!("/Span <</ActualText <FEFF{logical}>>> BDC\n").bytes());
-        let spaces = line.matches(' ').count();
-        let (x, tw) = placed(t, r, &paragraphs, i, *w, spaces, *rtl);
+        let gaps = stretch_gaps(line);
+        let (x, tw) = placed(t, r, &paragraphs, i, *w, gaps, *rtl);
+        // Thai has no spaces between words: a justified Thai line takes its extra advance after
+        // each dictionary word (at a cluster boundary), so the line still reads as one run and
+        // copy/search is the /ActualText above, with no inserted space.
+        let word_gaps = if tw != 0.0 && !rtl && line.chars().any(is_thai) { thai_word_gaps(line) } else { Vec::new() };
         let y = r[3] - (i as f64 * 1.2 + 0.95) * t.size;
         let mut pen = x;
+        let mut at = 0usize;
+        let mut next_gap = 0usize;
         let mut current: Option<&str> = None;
         for piece in pieces {
             match piece {
                 Piece::Latin(s) => {
-                    out.extend(format!("/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ", n(t.size), n(tw), n(pen), n(y)).bytes());
-                    out.extend(literal(&win_ansi(s)));
-                    out.extend_from_slice(b" Tj\n");
-                    current = Some(latin.as_str());
-                    pen += latin_width(t, s) + tw * s.matches(' ').count() as f64;
+                    // A Thai word gap can fall inside a Latin run (a space between Thai words is
+                    // in this font), so emit the run in chunks split at those boundaries.
+                    let mut chunks: Vec<&str> = Vec::new();
+                    if word_gaps.is_empty() {
+                        chunks.push(s);
+                        at += s.chars().count();
+                    } else {
+                        let mut last = 0usize;
+                        for (byte, _) in s.char_indices() {
+                            if word_gaps.get(next_gap) == Some(&at) {
+                                chunks.push(&s[last..byte]);
+                                last = byte;
+                                next_gap += 1;
+                            }
+                            at += 1;
+                        }
+                        chunks.push(&s[last..]);
+                    }
+                    for (j, chunk) in chunks.iter().enumerate() {
+                        if j > 0 {
+                            pen += tw;
+                        }
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        out.extend(format!("/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ", n(t.size), n(tw), n(pen), n(y)).bytes());
+                        out.extend(literal(&win_ansi(chunk)));
+                        out.extend_from_slice(b" Tj\n");
+                        current = Some(latin.as_str());
+                        pen += latin_width(t, chunk) + tw * chunk.matches(' ').count() as f64;
+                    }
                 }
                 Piece::Shaped(clusters) => {
                     for c in clusters {
@@ -144,6 +177,13 @@ pub(super) fn draw_laid_shaped(
                         out.extend(literal(&[code]));
                         out.extend_from_slice(b" Tj\n");
                         pen += c.advance * t.size + t.char_spacing + if c.text == " " { tw } else { 0.0 };
+                        at += c.text.chars().count();
+                        // A dictionary boundary ends the word here (the whole cluster stays
+                        // together), so the gap follows it.
+                        while word_gaps.get(next_gap).is_some_and(|&g| g <= at) {
+                            pen += tw;
+                            next_gap += 1;
+                        }
                     }
                 }
             }
@@ -305,7 +345,7 @@ pub(super) fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict
                 // Baseline: 0.8 em below the line top.
                 let y = r[3] - (i as f64 * 1.2 + 0.95) * t.size;
                 // Justified: word spacing makes every line of a paragraph but its last fill the box.
-                let (x, tw) = placed(t, r, &paragraphs, i, w, line.matches(' ').count(), false);
+                let (x, tw) = placed(t, r, &paragraphs, i, w, stretch_gaps(line), false);
                 out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", n(x), n(y), n(tw)).bytes());
                 out.extend(literal(&win_ansi(line)));
                 out.extend_from_slice(b" Tj\n");
