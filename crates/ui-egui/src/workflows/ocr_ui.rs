@@ -1181,6 +1181,48 @@ mod tests {
         assert_eq!(e.output_folder.as_deref(), Some("kept"), "an empty value is not a folder");
     }
 
+    /// Thai is one of the offered languages: the draft accepts it from the preferences, hands
+    /// it to the run, and writes it back; an unknown code leaves the default in place.
+    #[test]
+    fn the_draft_keeps_thai_and_refuses_an_unknown_language() {
+        assert!(OFFERED_LANGUAGES.iter().any(|(code, _)| *code == "th"), "Thai is offered");
+        let mut d = OcrDraft::default();
+        d.apply_pref(&serde_json::json!({ "language": "th" }));
+        assert_eq!(d.language, "th");
+        assert_eq!(d.settings().language, "th", "the run reads Thai");
+        let mut r = OcrDraft::default();
+        r.apply_pref(&d.to_pref());
+        assert_eq!(r.language, "th", "persists through the preferences round trip");
+        let mut bad = OcrDraft::default();
+        bad.apply_pref(&serde_json::json!({ "language": "xx" }));
+        assert_eq!(bad.language, "en", "an unknown code keeps the default");
+    }
+
+    /// The review's user dictionary is keyed by the language code, so a Thai reading keeps its
+    /// own `ocr-dictionary-th.txt` and never reads or writes English's file.
+    #[test]
+    fn the_thai_dictionary_is_its_own_file() {
+        let mut session = Session::new();
+        let text = session.create_from_text("t", "Thai scan").expect("fixture");
+        let id = session.open("t.pdf", None, text, None).expect("fixture");
+        let job = session.ocr_job(id, &[0], OcrSettings::default()).expect("fixture");
+        let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-thai-dictionary-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture");
+        let english = dir.join("ocr-dictionary-en.txt");
+        std::fs::write(&english, "english\n").expect("fixture");
+        let mut v = crate::workflows::ocr_verify::OcrVerify::default();
+        v.dictionary_dir = Some(dir.clone());
+        v.dictionary_language = "th".into();
+        v.load(id, job.guard.clone(), vec![]);
+        assert!(v.review.dictionary.is_empty(), "English's file is not Thai's");
+        assert!(v.add_to_dictionary("น้ำใจ", "th"), "{:?}", v.message);
+        let thai = dir.join("ocr-dictionary-th.txt");
+        assert!(std::fs::read_to_string(&thai).expect("the Thai file was written").contains("น้ำใจ"));
+        assert_eq!(std::fs::read_to_string(&english).expect("fixture"), "english\n", "English's file is untouched");
+        assert!(!v.add_to_dictionary("extra", "en"), "another language's dictionary is refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// "Automatic" saved without a strategy reads the way Automatic reads by default (the
     /// second engine joins when the first is unsure); an explicit choice always stands.
     #[test]

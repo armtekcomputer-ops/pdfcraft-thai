@@ -143,3 +143,179 @@ pub(crate) fn add_text(doc: &mut Document, page: usize, words: &[PlacedWord]) ->
     pdfcraft_edit::stamp(doc, page, "OCR", content.into_bytes())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use pdfcraft_cos::{Dict, Document, ObjRef, Object, Stream};
+
+    use super::*;
+
+    /// A one-page document with an empty content stream, built the way `printcheck` does.
+    fn page(doc: &mut Document) -> ObjRef {
+        let pages = doc.root().and_then(|r| doc.get(r).as_dict().and_then(|d| d.reference(b"Pages"))).unwrap();
+        let mut p = Dict::new();
+        p.set(b"Type".to_vec(), Object::name("Page"));
+        p.set(b"Parent".to_vec(), Object::Ref(pages));
+        p.set(b"MediaBox".to_vec(), Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]));
+        p.set(b"Contents".to_vec(), Object::Ref(doc.add(Object::Stream(Stream::from_raw(Dict::new(), Vec::new())))));
+        let r = doc.add(Object::Dict(p));
+        doc.update_dict(pages, |d| {
+            let mut kids = d.get(b"Kids").and_then(|k| k.as_array().cloned()).unwrap_or_default();
+            kids.push(Object::Ref(r));
+            d.set(b"Count".to_vec(), Object::Int(kids.len() as i64));
+            d.set(b"Kids".to_vec(), Object::Array(kids));
+        })
+        .unwrap();
+        r
+    }
+
+    fn placed(text: &str) -> PlacedWord {
+        PlacedWord { text: text.into(), origin: [72.0, 700.0], across: [60.0, 0.0], up: [0.0, 10.0], confidence: None, source: "test".into() }
+    }
+
+    /// The `PCOcr…` fonts this layer added to page 1, with their dictionaries.
+    fn ocr_fonts(doc: &Document) -> Vec<(String, Dict)> {
+        let page = pdfcraft_model::pages(doc).into_iter().next().expect("the test page");
+        let res = doc.resolve(page.dict.get(b"Resources").expect("resources")).as_dict().cloned().expect("a resource dict");
+        let fonts = doc.resolve(res.get(b"Font").expect("fonts")).as_dict().cloned().expect("a font dict");
+        fonts
+            .iter()
+            .filter(|(name, _)| name.starts_with(&b"PCOcr"[..]))
+            .map(|(name, font)| (String::from_utf8_lossy(name).into_owned(), doc.resolve(font).as_dict().cloned().expect("a font dict")))
+            .collect()
+    }
+
+    /// The decoded page content (all its streams, in order).
+    fn content(doc: &Document) -> String {
+        let page = pdfcraft_model::pages(doc).into_iter().next().expect("the test page");
+        let d = doc.get(page.obj).as_dict().cloned().unwrap_or_default();
+        let mut bytes = Vec::new();
+        let mut add = |o: &Object| {
+            if let Object::Stream(s) = &*doc.resolve(o) {
+                bytes.extend(s.decoded().unwrap_or_default());
+            }
+        };
+        match d.get(b"Contents") {
+            Some(Object::Array(a)) => a.iter().for_each(&mut add),
+            Some(o) => add(o),
+            None => {}
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Every `Tj` in the content: the font it names and the codes it shows, in order.
+    fn shown(content: &str) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut font = String::new();
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix('/')
+                && line.ends_with(" Tf")
+            {
+                font = rest.split_whitespace().next().unwrap_or_default().to_string();
+            } else if line.ends_with(" Tj")
+                && let (Some(start), Some(end)) = (line.find('<'), line.find('>'))
+            {
+                let hex = &line[start + 1..end];
+                let codes = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+                out.push((font.clone(), codes));
+            }
+        }
+        out
+    }
+
+    /// The font's ToUnicode CMap, as code → UTF-16 code units.
+    fn tounicode(doc: &Document, font: &Dict) -> BTreeMap<u8, Vec<u16>> {
+        let Object::Stream(stream) = &*doc.resolve(font.get(b"ToUnicode").expect("a ToUnicode map")) else {
+            panic!("ToUnicode is not a stream");
+        };
+        let cmap = String::from_utf8(stream.decoded().expect("a decodable CMap")).expect("a text CMap");
+        let mut map = BTreeMap::new();
+        let mut in_bfchar = false;
+        for line in cmap.lines() {
+            if line.ends_with("beginbfchar") {
+                in_bfchar = true;
+            } else if line == "endbfchar" {
+                in_bfchar = false;
+            } else if in_bfchar {
+                let mut parts = line.split_whitespace();
+                let (Some(src), Some(dst)) = (parts.next(), parts.next()) else { continue };
+                let code = u8::from_str_radix(src.trim_matches(['<', '>']), 16).expect("a hex code");
+                let hex = dst.trim_matches(['<', '>']);
+                let units = (0..hex.len()).step_by(4).map(|i| u16::from_str_radix(&hex[i..i + 4], 16).expect("a UTF-16 unit")).collect();
+                map.insert(code, units);
+            }
+        }
+        map
+    }
+
+    /// Thai means Type 3, never the WinAnsi stamp: the page gains a `PCOcr` font with a
+    /// `ToUnicode` stream.
+    #[test]
+    fn thai_text_gets_a_type3_font_with_a_tounicode_map() {
+        let mut doc = Document::new_empty();
+        page(&mut doc);
+        add_text(&mut doc, 0, &[placed("น้ำใจ")]).expect("the layer is written");
+        let fonts = ocr_fonts(&doc);
+        assert_eq!(fonts.len(), 1, "{fonts:?}");
+        let (name, font) = &fonts[0];
+        assert!(name.starts_with("PCOcr"), "{name}");
+        assert_eq!(font.get(b"Subtype").and_then(Object::as_name), Some(&b"Type3"[..]));
+        assert!(font.get(b"ToUnicode").is_some_and(|o| matches!(&*doc.resolve(o), Object::Stream(_))));
+        assert!(!tounicode(&doc, font).is_empty(), "the CMap maps the Thai codes");
+    }
+
+    /// Codes in the content map back, through the CMap, to the word's own UTF-16 units —
+    /// including the combining mark in "น้ำใจ".
+    #[test]
+    fn the_cmap_maps_the_codes_back_to_the_words_utf16() {
+        let word = "น้ำใจ";
+        assert!(word.chars().any(|c| c == '\u{0e49}'), "the fixture carries a combining mark");
+        let mut doc = Document::new_empty();
+        page(&mut doc);
+        add_text(&mut doc, 0, &[placed(word)]).expect("the layer is written");
+        let (name, font) = &ocr_fonts(&doc)[0];
+        let map = tounicode(&doc, font);
+        let shown = shown(&content(&doc));
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(&shown[0].0, name);
+        let units: Vec<u16> = shown[0].1.iter().flat_map(|code| map.get(code).cloned().unwrap_or_default()).collect();
+        assert_eq!(String::from_utf16(&units).expect("valid UTF-16"), word);
+        assert!(map.values().any(|units| units == &[0x0e49u16]), "the combining mark is mapped");
+    }
+
+    /// More than 255 distinct characters need a second `PCOcr` font; the per-font code space
+    /// starts at 1 in every font, so content never shows code 0.
+    #[test]
+    fn more_than_255_distinct_characters_spread_over_several_fonts_without_code_zero() {
+        let text: String = (0..300).map(|i| char::from_u32(0x1000 + i).expect("a BMP character")).collect();
+        let mut doc = Document::new_empty();
+        page(&mut doc);
+        add_text(&mut doc, 0, &[placed(&text)]).expect("the layer is written");
+        let fonts = ocr_fonts(&doc);
+        assert_eq!(fonts.len(), 2, "300 characters need two fonts: {:?}", fonts.iter().map(|(n, _)| n).collect::<Vec<_>>());
+        let lasts: Vec<i64> = fonts.iter().map(|(_, f)| f.get(b"LastChar").and_then(Object::as_int).unwrap_or_default()).collect();
+        assert_eq!(lasts, vec![255, 45]);
+        // Every font carries its own ToUnicode map.
+        assert!(fonts.iter().all(|(_, f)| !tounicode(&doc, f).is_empty()));
+        let shown = shown(&content(&doc));
+        assert_eq!(shown.len(), 2, "the word continues in the second font");
+        assert!(shown.iter().all(|(_, codes)| codes.iter().all(|c| *c != 0)), "code 0 is never emitted: {shown:?}");
+        assert!(shown.iter().any(|(font, codes)| font == "PCOcr1" && codes.len() == 45), "{shown:?}");
+    }
+
+    /// A word with a zero-length box is skipped: nothing is shown for it, while a good word in
+    /// the same layer still is.
+    #[test]
+    fn a_word_with_a_degenerate_box_is_skipped() {
+        let mut across_zero = placed("ใจ");
+        across_zero.across = [0.0, 0.0];
+        let mut up_zero = placed("น้ำ");
+        up_zero.up = [0.0, 0.0];
+        let mut doc = Document::new_empty();
+        page(&mut doc);
+        add_text(&mut doc, 0, &[across_zero, up_zero, placed("น้ำใจ")]).expect("the layer is written");
+        let shown = shown(&content(&doc));
+        assert_eq!(shown.len(), 1, "only the word with a real box is shown: {shown:?}");
+        assert_eq!(shown[0].1.len(), 5, "the shown word is the whole of \"น้ำใจ\"");
+    }
+}

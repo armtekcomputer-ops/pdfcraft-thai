@@ -324,6 +324,82 @@ mod tests {
         assert!(plan.missing() > 0, "characters beyond the caps are reported, never silently dropped");
     }
 
+    /// Split each input character's outcome into (planned, lost): planned when its encoding
+    /// points at the glyph the plan made for it, or when WinAnsi writes it as is; lost when it
+    /// is a `?` stand-in or absent from the run. The two add up to the input length and `lost`
+    /// is what [`TextPlan::missing`] reports, so no character can vanish between the counts.
+    fn planned_and_lost(plan: &TextPlan, words: &[&str]) -> (usize, usize) {
+        let mut planned = 0;
+        let mut lost = 0;
+        for (i, word) in words.iter().enumerate() {
+            let enc = plan.encoding(i);
+            for (j, ch) in word.chars().enumerate() {
+                match enc.get(j) {
+                    Some(&at) if plan.index.get(&ch) == Some(&at) => planned += 1,
+                    Some(_) => lost += 1,
+                    None if win_ansi_char(ch).is_some() => planned += 1,
+                    None => lost += 1,
+                }
+            }
+        }
+        (planned, lost)
+    }
+
+    /// Thai has no WinAnsi code, and the crate has no way to fake craft-fonts in tests (the
+    /// faces are a build-time constant): without it every Thai character must be reported as a
+    /// substitution, never silently dropped, and the counts must still add up per character —
+    /// including the combining marks of `น้ำ`, which are separate input characters here.
+    #[test]
+    fn thai_is_reported_as_substitutions_never_silently_dropped() {
+        let words = ["สวัสดี", "ครับ", "น้ำ", "PDF", "ประชุม"];
+        let input: usize = words.iter().map(|w| w.chars().count()).sum();
+        let plan = TextPlan::for_words(words);
+        let (planned, lost) = planned_and_lost(&plan, &words);
+        assert_eq!(planned + lost, input, "every input character is planned or counted missing");
+        assert_eq!(lost, plan.missing(), "the per-character tally agrees with the plan's count");
+        let thai = words.iter().flat_map(|w| w.chars()).filter(|&c| win_ansi_char(c).is_none()).count();
+        assert!(thai > 0 && thai < input, "the sample mixes Thai with WinAnsi Latin");
+        if crate::CRAFT_FONTS.is_empty() {
+            assert!(plan.fonts.is_empty(), "no faces, no Type3 fonts");
+            assert!(plan.words.iter().all(Vec::is_empty), "nothing can be encoded");
+            assert_eq!(plan.missing(), thai, "each Thai character is reported, none dropped");
+        } else {
+            // A Thai face is in the build input: the plan may draw it instead, but the
+            // accounting may not change and nothing may be lost.
+            assert!(plan.missing() <= thai);
+        }
+    }
+
+    /// A realistic 300-character Thai/Latin run (3,000 *distinct* Thai characters cannot be
+    /// built — Thai has ~90): the documented caps hold, every font stays within
+    /// [`MAX_TYPE3_GLYPHS`], and characters beyond the budget are counted, not panicked on.
+    #[test]
+    fn a_long_mixed_thai_run_stays_within_the_glyph_caps() {
+        let seed = ["ภาษาไทย", "การพิมพ์เอกสาร", "น้ำ", "PDF", "Unicode", "ตัวอักษร"];
+        let mut words: Vec<&str> = Vec::new();
+        let mut input = 0;
+        while input < 300 {
+            for word in seed {
+                words.push(word);
+                input += word.chars().count();
+            }
+        }
+        let plan = TextPlan::for_words(words.iter().copied());
+        assert!(input >= 300);
+        assert!(plan.fonts.len() <= MAX_PLAN_GLYPHS / MAX_TYPE3_GLYPHS, "at most 10 full fonts");
+        assert!(plan.fonts.iter().all(|f| f.glyphs.len() <= MAX_TYPE3_GLYPHS));
+        assert!(plan.planned_glyphs() <= MAX_PLAN_GLYPHS);
+        let (planned, lost) = planned_and_lost(&plan, &words);
+        assert_eq!(planned + lost, input);
+        assert_eq!(lost, plan.missing());
+        let thai = words.iter().flat_map(|w| w.chars()).filter(|&c| win_ansi_char(c).is_none()).count();
+        if crate::CRAFT_FONTS.is_empty() {
+            assert_eq!(plan.missing(), thai, "all Thai characters reported beyond the cap-free fallback");
+        } else {
+            assert!(plan.missing() <= thai);
+        }
+    }
+
     #[test]
     fn substitution_and_unknown_scripts_come_out_counted() {
         if crate::CRAFT_FONTS.is_empty() {

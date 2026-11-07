@@ -70,6 +70,42 @@ mod tests {
     }
 
     #[test]
+    fn thai_words_keep_their_combining_marks_through_words_and_update() {
+        let text = "น้ำใจ\n";
+        assert!(words(text).unwrap().contains("น้ำใจ"));
+        let updated = update("", &["น้ำใจ"], &[]).unwrap();
+        assert_eq!(updated, "น้ำใจ\n");
+        let round_tripped: String = words(&updated).unwrap().into_iter().collect();
+        assert_eq!(round_tripped.chars().collect::<Vec<_>>(), "น้ำใจ".chars().collect::<Vec<_>>());
+        // Lowercase must not reorder or drop the marks written in a different order.
+        assert_eq!(words("น้ำใจ").unwrap(), BTreeSet::from(["น้ำใจ".to_string()]));
+    }
+
+    #[test]
+    fn thai_phrases_are_one_entry_and_whitespace_variants_collapse() {
+        let text = words("  ภาษา ไทย  \nภาษา ไทย\nภาษา  ไทย\n").unwrap();
+        assert_eq!(
+            text,
+            BTreeSet::from(["ภาษา ไทย".to_string(), "ภาษา  ไทย".to_string()]),
+            "outer whitespace trims like Latin; inner spacing stays distinct"
+        );
+        assert_eq!(update("", &["ภาษา ไทย", " ภาษา ไทย "], &[]).unwrap(), "ภาษา ไทย\n");
+    }
+
+    #[test]
+    fn thai_entries_are_never_split_or_truncated() {
+        assert_eq!(words("ภาษา ไทย").unwrap().len(), 1);
+        let at_limit = format!("{}{}", "ก".repeat(341), "a");
+        assert_eq!(at_limit.len(), 1024);
+        assert!(words(&at_limit).unwrap().contains(&at_limit));
+        let over_limit = format!("{at_limit}a");
+        let err = update("", &[&over_limit], &[]).unwrap_err();
+        assert!(err.contains("1024 bytes"), "{err}");
+        assert!(words(&over_limit).is_err());
+        assert_eq!(update("original\n", &[&over_limit], &[]).unwrap_err(), err);
+    }
+
+    #[test]
     fn dictionary_limits_cover_existing_and_added_entries() {
         let full: String = (0..65536).map(|i| format!("word{i}\n")).collect();
         assert_eq!(words(&full).unwrap().len(), 65536);

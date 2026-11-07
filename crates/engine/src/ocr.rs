@@ -1847,6 +1847,69 @@ mod tests {
         assert!(extracted.contains(&text) && extracted.contains("另一行"), "{extracted}");
     }
 
+    /// A Thai line as recognition leaves it: clusters in flush boxes, each starting where the
+    /// one before ends, so nothing separates them on the page.
+    fn thai_line(clusters: &[&str], x: f64, y: f64) -> Vec<PlacedWord> {
+        let mut at = x;
+        clusters
+            .iter()
+            .map(|text| {
+                let width = 7.0 * text.chars().count() as f64;
+                let word = PlacedWord {
+                    text: (*text).into(),
+                    origin: [at, y],
+                    across: [width, 0.0],
+                    up: [0.0, 10.0],
+                    confidence: None,
+                    source: "ocrs".into(),
+                };
+                at += width;
+                word
+            })
+            .collect()
+    }
+
+    /// Thai clusters from one line read back joined: flush boxes take no space between them,
+    /// and the marks stay where recognition put them.
+    #[test]
+    fn thai_searchable_layer_round_trips() {
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let id = s.open("src.pdf", None, Arc::new(fixture(1)), None).unwrap();
+        let words = thai_line(&["สวัสดี", "ครับ", "ภาษา", "ไทย"], 20.0, 250.0);
+        s.apply(id, Edit::AddOcrText { page: 0, words }).unwrap();
+        let text = crate::tests::page_texts(&s, id)[0].clone();
+        assert!(text.contains("สวัสดีครับภาษาไทย"), "{text}");
+    }
+
+    /// The Thai layer is searchable after a save and reopen, and it never changes the pixels.
+    #[test]
+    fn thai_searchable_layer_survives_save_and_reopen() {
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let id = s.open("src.pdf", None, Arc::new(fixture(1)), None).unwrap();
+        let before = crate::export::Exporter::new(s.get(id).unwrap()).png(0, 72.0).unwrap();
+        let words = thai_line(&["สวัสดี", "ครับ", "ภาษา", "ไทย"], 20.0, 250.0);
+        s.apply(id, Edit::AddOcrText { page: 0, words }).unwrap();
+        assert_eq!(crate::export::Exporter::new(s.get(id).unwrap()).png(0, 72.0).unwrap(), before);
+        let saved = s.save_bytes(id).unwrap();
+        let reopened = s.open("searchable-thai.pdf", None, saved, None).unwrap();
+        assert!(crate::tests::page_texts(&s, reopened)[0].contains("สวัสดีครับภาษาไทย"));
+        assert_eq!(crate::export::Exporter::new(s.get(reopened).unwrap()).png(0, 72.0).unwrap(), before);
+    }
+
+    /// Stacked marks stay in their own word, in order: the extracted character sequence is the
+    /// one written, not merely a string that happens to contain it.
+    #[test]
+    fn thai_searchable_layer_keeps_marks_in_their_word() {
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let id = s.open("src.pdf", None, Arc::new(fixture(1)), None).unwrap();
+        let words = thai_line(&["น้ำใจ", "ครั้งที่"], 20.0, 250.0);
+        s.apply(id, Edit::AddOcrText { page: 0, words }).unwrap();
+        let text = crate::tests::page_texts(&s, id)[0].clone();
+        let expected: Vec<char> = "น้ำใจครั้งที่".chars().collect();
+        let got: Vec<char> = text.chars().collect();
+        assert!(got.windows(expected.len()).any(|w| w == expected.as_slice()), "the marks moved or reordered: {text:?}");
+    }
+
     #[test]
     fn searchable_unicode_rejects_excessive_or_non_finite_input_atomically() {
         let mut s = Session::new();

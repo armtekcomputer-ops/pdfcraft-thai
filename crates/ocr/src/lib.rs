@@ -505,6 +505,58 @@ pub fn text_layer(words: &[PlacedWord], plan: &pdfcraft_fonts::TextPlan) -> Vec<
 mod tests {
     use super::*;
 
+    /// Give every planned font the resource name the registrar (`pdfcraft_edit::add_type3_fonts`)
+    /// fills in, so the layers take the planned path; this crate cannot reach that step.
+    fn name_fonts(plan: &mut TextPlan) {
+        for (i, font) in plan.fonts.iter_mut().enumerate() {
+            font.name = format!("PCOcr{i}");
+        }
+    }
+
+    /// Every `… Tm (…) Tj` the layer writes: the six matrix numbers and the literal's bytes,
+    /// unescaped. One entry per shown run, in content order.
+    fn shown_runs(content: &str) -> Vec<([f64; 6], Vec<u8>)> {
+        let mut out = Vec::new();
+        for line in content.lines() {
+            let Some((before, after)) = line.split_once(" Tm ") else { continue };
+            let Some((literal, rest)) = after.split_once(" Tj") else { continue };
+            assert!(rest.is_empty(), "operators after a shown string: {rest:?}");
+            let Some(inner) = literal.strip_prefix('(').and_then(|l| l.strip_suffix(')')) else {
+                panic!("not a literal: {literal:?}");
+            };
+            let nums: Vec<f64> = before.split_ascii_whitespace().rev().take(6).filter_map(|t| t.parse().ok()).collect();
+            assert_eq!(nums.len(), 6, "not a text matrix: {before:?}");
+            out.push(([nums[5], nums[4], nums[3], nums[2], nums[1], nums[0]], unescape(inner.as_bytes())));
+        }
+        out
+    }
+
+    fn unescape(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(&b) = bytes.get(i) {
+            if b == b'\\' {
+                let Some(&next) = bytes.get(i + 1) else { break };
+                out.push(match next {
+                    b'n' => b'\n',
+                    b'r' => b'\r',
+                    other => other,
+                });
+                i += 2;
+            } else {
+                out.push(b);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Whether the code `(font, code)` in `plan` is the glyph planned for `ch` itself (not the
+    /// font's `?` stand-in and not another character).
+    fn glyph_is(plan: &TextPlan, (font, code): (usize, u8), ch: char) -> bool {
+        plan.fonts.get(font).and_then(|font| font.glyphs.get(usize::from(code).checked_sub(1)?)).is_some_and(|(planned, _)| *planned == ch)
+    }
+
     #[test]
     fn offered_languages_include_thai() {
         assert!(OFFERED_LANGUAGES.contains(&("th", "Thai")), "{OFFERED_LANGUAGES:?}");
@@ -635,6 +687,109 @@ mod tests {
             assert_eq!(s, "/OCR BMC\nq\nBT\n3 Tr\n/PCHelv 1 Tf\nET\nQ\nEMC\n", "{why}: {s}");
             assert!(!s.contains("NaN") && !s.contains("inf"), "{why}: {s}");
         }
+    }
+
+    /// Thai words are written one flush box after another: two clusters whose boxes touch get two
+    /// `Tj` runs, the second starting exactly where the first ends. No synthetic space is put
+    /// between them (Thai has none) and no advance is inserted beyond the boxes.
+    #[test]
+    fn text_layer_places_thai_clusters_without_gaps() {
+        let word = |text: &str, left: f64| PlacedWord {
+            text: text.into(),
+            origin: [left, 20.0],
+            across: [30.0, 0.0],
+            up: [0.0, 9.3],
+            confidence: None,
+            source: "tesseract".into(),
+        };
+        let words = [word("สวัสดี", 10.0), word("ครับ", 40.0)];
+        let mut plan = TextPlan::for_words(words.iter().map(|w| w.text.as_str()));
+        name_fonts(&mut plan);
+        let s = String::from_utf8(text_layer(&words, &plan)).unwrap();
+        let runs = shown_runs(&s);
+        assert_eq!(runs.len(), 2, "one run per cluster: {s}");
+        for (_, shown) in &runs {
+            assert!(!shown.is_empty(), "an empty literal is a lost cluster: {s}");
+            assert!(!shown.contains(&b' '), "no synthetic space inside a Thai cluster: {s}");
+        }
+        let (first, second) = (&runs[0].0, &runs[1].0);
+        assert_eq!(first[4], 10.0, "the first cluster starts at its box: {s}");
+        assert_eq!(second[4], 40.0, "the second cluster starts at its box, not after a gap: {s}");
+        assert_eq!(second[4] - first[4], 30.0, "the clusters tile flush, one box width apart: {s}");
+        assert_eq!(first[5], second[5], "both stay on the same baseline: {s}");
+        for op in ["Td", "TD", "TJ", "T*"] {
+            assert!(!s.contains(op), "no extra pen movement between clusters ({op}): {s}");
+        }
+    }
+
+    /// Combining marks occupy the word's one box: every character of `น้ำใจ`, mark or base,
+    /// advances inside the single pen position, and the advances the layer fits sum to exactly
+    /// the word's `across` length (marks add no width of their own).
+    #[test]
+    fn text_layer_gives_thai_marks_a_share_of_the_word_box() {
+        let text = "น้ำใจ";
+        let across = 40.0;
+        let w = PlacedWord {
+            text: text.into(),
+            origin: [10.0, 20.0],
+            across: [across, 0.0],
+            up: [0.0, 9.3],
+            confidence: None,
+            source: "tesseract".into(),
+        };
+        let mut plan = TextPlan::for_words([text]);
+        name_fonts(&mut plan);
+        let s = String::from_utf8(text_layer(std::slice::from_ref(&w), &plan)).unwrap();
+        let runs = shown_runs(&s);
+        assert_eq!(runs.len(), 1, "the whole word, marks included, shares one pen position: {s}");
+        let scale = runs[0].0[0];
+        let advances: Vec<f64> = match planned_runs(&plan, 0) {
+            Some((_, total)) => {
+                let enc = plan.encoding(0);
+                assert_eq!(enc.len(), text.chars().count(), "one code per character, marks included");
+                let per_char: Vec<f64> = enc.iter().map(|&(font, code)| plan.advance(font, code)).collect();
+                let sum: f64 = per_char.iter().sum();
+                assert!((sum - total).abs() < 1e-9, "the fit uses exactly these advances: {sum} != {total}");
+                per_char
+            }
+            None => {
+                assert!(plan.encoding(0).is_empty(), "no plan, no codes");
+                text.chars()
+                    .map(|c| {
+                        let mut buf = [0u8; 4];
+                        helvetica_width(c.encode_utf8(&mut buf), 1.0)
+                    })
+                    .collect()
+            }
+        };
+        let fitted: f64 = advances.iter().map(|advance| advance * scale).sum();
+        assert!((fitted - across).abs() < 1e-3, "the characters, marks included, fill exactly the word box: {fitted} != {across} in {s}");
+    }
+
+    /// The visible layer never loses a Thai character: each character of `น้ำใจ` either gets its
+    /// own planned code in the shown runs or is counted by the plan as missing. The accounting is
+    /// what is checked, not the pixels.
+    #[test]
+    fn visible_text_layer_never_drops_a_thai_character() {
+        let text = "น้ำใจ";
+        let w =
+            PlacedWord { text: text.into(), origin: [10.0, 20.0], across: [40.0, 0.0], up: [0.0, 9.3], confidence: None, source: "tesseract".into() };
+        let mut plan = TextPlan::for_words([text]);
+        name_fonts(&mut plan);
+        let s = String::from_utf8(visible_text_layer(std::slice::from_ref(&w), &plan)).unwrap();
+        let chars = text.chars().count();
+        let enc = plan.encoding(0);
+        let planned = planned_runs(&plan, 0);
+        if planned.is_some() {
+            let covered = text.chars().enumerate().filter(|&(i, ch)| enc.get(i).is_some_and(|&at| glyph_is(&plan, at, ch))).count();
+            assert_eq!(covered + plan.missing(), chars, "every Thai character is planned or reported missing");
+        } else {
+            assert_eq!(plan.missing(), chars, "no face: every Thai character is reported, none silently dropped");
+        }
+        // Every planned code (or, without a plan, the WinAnsi stand-ins) reaches a shown run.
+        let shown: Vec<u8> = shown_runs(&s).into_iter().flat_map(|(_, literal)| literal).collect();
+        let expected: Vec<u8> = if planned.is_some() { enc.iter().map(|&(_, code)| code).collect() } else { pdfcraft_fonts::win_ansi(text) };
+        assert_eq!(shown, expected, "the layer shows exactly the planned characters: {s}");
     }
 
     /// The editable-text layer draws visible text whose horizontal scaling is an explicit

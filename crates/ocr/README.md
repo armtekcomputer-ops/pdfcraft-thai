@@ -72,6 +72,9 @@ let layer = visible_text_layer(&placed, &plan);          // visible text: the ed
 - **Searchable output preserves Unicode without display fonts.** The engine uses empty
   Type3 character programs and `/ToUnicode` maps for non-WinAnsi words, leaving the scan
   unchanged. WinAnsi words use `/PCHelv`; the `/OCR` layer is fitted to each word's box.
+  Thai and every other non-WinAnsi script take the same path — a Type3 font with empty glyph
+  programs and a `/ToUnicode` map fitted to the recognised word boxes — and Thai clusters are
+  placed without inserted spaces.
 - **Editable output uses display glyphs.** `visible_text_layer` writes visible text whose
   size comes from the box height and whose horizontal scaling uses real font advances.
   Beyond WinAnsi, attributed craft-fonts faces supply outline Type3 glyphs with `/ToUnicode`.
