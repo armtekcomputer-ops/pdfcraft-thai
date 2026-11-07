@@ -13,6 +13,9 @@
 /// prompt shows both, and an AppImage's menu entry gets the icon.
 #[cfg(not(target_arch = "wasm32"))]
 pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
+    // Updates for this build come from its own repository, not upstream PdfCraft's: the two
+    // version streams are independent (this fork ships Thai OCR and text editing).
+    repo: "armtekcomputer-ops/pdfcraft-thai",
     icon_png: Some(include_bytes!("../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.pdfcraft.png")),
     accent: Some([0xb7, 0x02, 0x28]),
     ..craft_update::suite::PDFCRAFT
