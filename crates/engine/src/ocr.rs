@@ -2110,6 +2110,143 @@ mod tests {
         assert_eq!(page, 0);
     }
 
+    /// The editable output draws Thai text, marks and all, on the page it claims to fill: the ink
+    /// lands inside the word's box, little or none escapes the margin around it, and a word with a
+    /// tone mark has more ink above its base than the same word without one — so the mark is drawn,
+    /// not dropped, and the advance does not spill the word past its box.
+    #[test]
+    fn thai_visible_text_lands_in_its_box_and_draws_its_mark() {
+        if pdfcraft_fonts::TextPlan::for_words(["น้ำ"]).missing() > 0 {
+            eprintln!("skipping: built without craft-fonts");
+            return;
+        }
+        // The plan covers the word: no character is missing, so the render is the face's own.
+        assert_eq!(pdfcraft_fonts::TextPlan::for_words(["น้ำใจ"]).missing(), 0);
+
+        // A 120 x 30 pt box at 72 dpi is 120 x 30 px on a 240 x 240 pt page.
+        let rect = [60.0, 100.0, 180.0, 130.0];
+        let marked = render_editable_word("น้ำใจ", rect);
+        let control = render_editable_word("นำใจ", rect);
+        let (w, h) = (marked.width, marked.height);
+        assert_eq!((w, h), (240, 240), "72 dpi is one pixel per point");
+
+        // The box in raster coordinates (the page's origin is its top-left there).
+        let box_px = [60, h - 130, 180, h - 100];
+        let [bx0, by0, bx1, by1] = box_px;
+        let box_area = (bx1 - bx0) * (by1 - by0);
+        let ink_in_box = ink(&marked, bx0, by0, bx1, by1);
+        let ink_whole = ink(&marked, 0, 0, w, h);
+        let outside = ink_whole - ink_in_box;
+
+        // 1. Ink lands inside the box where the word was placed.
+        assert!(ink_in_box * 50 >= box_area, "at least 2% of the box is dark: {ink_in_box}/{box_area}");
+        assert!(ink_in_box * 100 >= ink_whole * 85, "the box holds the word: {ink_in_box} of {ink_whole}");
+
+        // 2. Little or no ink outside the box: the 20%-of-height strips left, right and below
+        //    the box stay pure paper, so no glyph of a wrong advance spills sideways.
+        let m = ((by1 - by0) as f64 * 0.2).round() as u32;
+        let left = ink(&marked, bx0.saturating_sub(m), by0, bx0, by1);
+        let right = ink(&marked, bx1, by0, (bx1 + m).min(w), by1);
+        let below = ink(&marked, bx0, by1, bx1, (by1 + m).min(h));
+        let above = ink(&marked, bx0, by0.saturating_sub(m), bx1, by0);
+        eprintln!("thai margins: left={left} right={right} below={below} above={above} outside={outside}");
+        assert_eq!((left, right, below), (0, 0, 0), "no ink on the sides or below the word");
+        // Thai marks rise above the OCR box's height (BOX_EM is the line height, not the face's
+        // ascender), so the little ink above stays inside the top margin and is a small share.
+        assert_eq!(above, outside, "all ink outside the box is above it, within the margin");
+        assert!(outside * 50 <= box_area, "little ink outside the box (<= 2% of it): {outside}/{box_area}");
+        // The margin as a whole stays near-white too: at most 3% of its pixels are dark.
+        let (mx0, my0) = (bx0.saturating_sub(m), by0.saturating_sub(m));
+        let (mx1, my1) = ((bx1 + m).min(w), (by1 + m).min(h));
+        let margin_px = (mx1 - mx0) * (my1 - my0) - box_area;
+        eprintln!("thai margin: dark={outside}/{margin_px}");
+        assert!(outside * 33 <= margin_px, "the margin stays near-white: {outside} of {margin_px} dark");
+
+        // 3. The tone mark lives in the upper band: the marked word has more ink above 55% of the
+        //    box height than the control, and the two renders really differ.
+        let band_bottom = by0 + ((by1 - by0) as f64 * 0.45).round() as u32; // above 55% from the bottom
+        let marked_upper = ink(&marked, bx0, by0, bx1, band_bottom);
+        let control_upper = ink(&control, bx0, by0, bx1, band_bottom);
+        let marked_ink = ink(&marked, bx0, by0, bx1, by1);
+        let control_ink = ink(&control, bx0, by0, bx1, by1);
+        eprintln!("thai upper: marked={marked_upper}/{marked_ink} control={control_upper}/{control_ink}");
+        assert!(marked_upper > control_upper, "the mark adds ink above the base: {marked_upper} vs {control_upper}");
+        assert!(marked_ink > control_ink, "the mark adds ink overall: {marked_ink} vs {control_ink}");
+        assert_ne!(marked.rgba, control.rgba, "the two renders differ");
+    }
+
+    /// Renders `text` the way the editable OCR output does: a fresh one-page 240 x 240 pt document
+    /// with standard Helvetica as `/PCHelv`, the plan's Type3 fonts added to the page, and the
+    /// page content from [`pdfcraft_ocr::visible_text_layer_at`]. 72 dpi = one pixel per point.
+    fn render_editable_word(text: &str, rect: [f64; 4]) -> pdfcraft_render::RenderedPage {
+        let [x0, y0, x1, y1] = rect;
+        let mut plan = pdfcraft_fonts::TextPlan::for_words([text]);
+        assert_eq!(plan.missing(), 0, "the test needs a face for every character of {text}");
+        let words =
+            [PlacedWord { text: text.into(), origin: [x0, y0], across: [x1 - x0, 0.0], up: [0.0, y1 - y0], confidence: None, source: "test".into() }];
+        let mut created = pdfcraft_create::from_contents(&[(240.0, 240.0, pdfcraft_cos::Dict::new(), Vec::new())]).unwrap();
+        let mut font = pdfcraft_cos::Dict::new();
+        font.set(b"Type".to_vec(), pdfcraft_cos::Object::name("Font"));
+        font.set(b"Subtype".to_vec(), pdfcraft_cos::Object::name("Type1"));
+        font.set(b"BaseFont".to_vec(), pdfcraft_cos::Object::name("Helvetica"));
+        font.set(b"Encoding".to_vec(), pdfcraft_cos::Object::name("WinAnsiEncoding"));
+        let fr = created.add(font);
+        // The page tree's kids, direct array or indirect reference (the fresh document keeps
+        // /Kids inline), as the editable output links its pages through them.
+        let kids = created
+            .root()
+            .and_then(|r| created.get(r).as_dict().cloned())
+            .and_then(|d| d.reference(b"Pages"))
+            .and_then(|p| created.get(p).as_dict().cloned())
+            .and_then(|d| match d.get(b"Kids").map(|k| created.resolve(k)).as_deref() {
+                Some(pdfcraft_cos::Object::Array(a)) => Some(a.clone()),
+                Some(pdfcraft_cos::Object::Ref(r)) => created.get(*r).as_array().cloned(),
+                _ => None,
+            });
+        let page = kids
+            .and_then(|a| a.into_iter().next())
+            .and_then(|k| match k {
+                pdfcraft_cos::Object::Ref(r) => Some(r),
+                _ => None,
+            })
+            .expect("the created page");
+        created
+            .update_dict(page, |d| {
+                let mut res = d.get(b"Resources").and_then(|o| o.as_dict().cloned()).unwrap_or_default();
+                let mut fonts = res.get(b"Font").and_then(|o| o.as_dict().cloned()).unwrap_or_default();
+                fonts.set(b"PCHelv".to_vec(), pdfcraft_cos::Object::Ref(fr));
+                res.set(b"Font".to_vec(), pdfcraft_cos::Object::Dict(fonts));
+                d.set(b"Resources".to_vec(), pdfcraft_cos::Object::Dict(res));
+            })
+            .unwrap();
+        pdfcraft_edit::add_type3_fonts(&mut created, 0, &mut plan).unwrap();
+        let content = pdfcraft_ocr::visible_text_layer_at(&words, &plan, 0);
+        let mut dict = pdfcraft_cos::Dict::new();
+        dict.set(b"PCMark".to_vec(), pdfcraft_cos::Object::name("OCR"));
+        let stream = created.add(pdfcraft_cos::Object::Stream(pdfcraft_cos::Stream::flate(dict, &content)));
+        created.update_dict(page, |d| d.set(b"Contents".to_vec(), pdfcraft_cos::Object::Ref(stream))).unwrap();
+        let bytes = pdfcraft_cos::write_full(&created, &pdfcraft_cos::SaveOptions::default()).unwrap();
+        let mut renderer = pdfcraft_render::PageRenderer::new(Arc::new(bytes), pdfcraft_render::RenderConfig::default());
+        let rendered = renderer.render(pdfcraft_render::RenderRequest { page: 0, scale: 1.0, ..Default::default() });
+        assert!(rendered.error.is_none(), "{:?}", rendered.error);
+        rendered
+    }
+
+    /// Dark pixels in the half-open raster rectangle `[x0, x1) x [y0, y1)`: paper is white, ink
+    /// is anything meaningfully darker (a light antialiasing fringe does not count).
+    fn ink(r: &pdfcraft_render::RenderedPage, x0: u32, y0: u32, x1: u32, y1: u32) -> u32 {
+        let mut n = 0;
+        for y in y0..y1.min(r.height) {
+            for x in x0..x1.min(r.width) {
+                let o = ((y * r.width + x) * 4) as usize;
+                if u32::from(r.rgba[o]) + u32::from(r.rgba[o + 1]) + u32::from(r.rgba[o + 2]) < 600 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// #1848: an A4 scan at 300 dpi whose page box is its pixel size (2480 x 3508 pt, one pixel
     /// per point) gets a smaller bitmap for each lower "Downsample to" choice, and a low-resolution
     /// letter page is still never shrunk below one pixel per point.

@@ -85,6 +85,9 @@ let layer = visible_text_layer(&placed, &plan);          // visible text: the ed
   output retains them. The engine refuses nonfinite geometry or oversized input before
   planning fonts: 4 MiB of text and 65,536 words, across all pages for editable export.
   Empty geometry is skipped; rotated words carry `across`/`up` vectors and retain direction.
+  The layer is covered by a pixel-level regression test that renders it and asserts the ink
+  stays inside the recognised word box with no spill, and that removing the mark changes the
+  render; it is skipped when the build has no craft-fonts faces.
 - **Hostile input is rejected, not panicked at.** `OcrImage` holds private, validated state:
   non-zero sides, a 10 000-pixel side cap, a 64-megapixel area cap (checked arithmetic — the
   counts come from documents, so they are untrusted), and an exact buffer length.
