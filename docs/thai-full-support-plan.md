@@ -1,5 +1,35 @@
 # แผนพัฒนา: Thai Full Support (ฟอนต์ + OCR)
 
+> **สถานะล่าสุด (2026-11-07):** ดูหัวข้อ 0 ด้านล่างสำหรับงานที่ปิดแล้วและที่ยังติดข้อจำกัดภายนอก
+
+## 0. สถานะความคืบหน้า
+
+### ปิดแล้ว (มี commit ใน repo นี้)
+| งาน | Commit |
+|---|---|
+| T1 เสนอภาษาไทย + route ไป Tesseract (ไม่ส่งให้ ocrs) | `376ecbe4` |
+| T2 bundle `tha`/`eng` + SHA-256 + `TESSDATA_PREFIX` แบบมีเงื่อนไข | `f5d5ef92` |
+| T4 อ่านไทยแบบ `tha+eng` (CER 6.2% → 1.5%) + TSV ผ่าน `-c tessedit_create_tsv=1` | `f5d5ef92` |
+| T7 ต่อ cluster ไทยไม่ใส่ช่องว่าง + dictionary segmentation (ICU4X) | `fb9cdc6a` |
+| T6 searchable text layer: round-trip/save/marks/Type3 tests | `46f9c025` |
+| วรรณยุกต์ไทยใน editable output (ไม่เป็น `?`, วางตาม GPOS offset) | `f1e8fdf3` |
+| Visual regression: ink ในกล่อง/ไม่ล้น/วรรณยุกต์เปลี่ยนภาพ | `9c5cebb0` |
+| Audit ข้อ 3–4: WinAnsi gate + Helvetica บนหน้า mixed | `48f04bf0` |
+| ตัดบรรทัดไทยตามขอบเขตคำ (Add Text) | `ecef5fc2` |
+| TIS-620/CP874 ทั้ง extraction และ renderer (vendored patch 76) | `0d72ad49` |
+
+### ยังไม่ปิด — ติดข้อจำกัดภายนอกหรือต้องคนไทยตรวจ
+| งาน | เหตุที่ยังทำไม่ได้ |
+|---|---|
+| C1 catalog ภาษาไทย (~2,800 keys) | ต้องแก้ repo `craft-i18n` แยก + bump `craft-i18n.rev`; ต้องมี native review |
+| A2 Thai Bold / A3 oblique | craft-fonts pin `b076417b` มีเฉพาะ Noto Sans Thai Regular |
+| D6 accuracy corpus จริง | ต้องใช้ scan ที่มีสิทธิ์ใช้ (ห้ามใช้รูปจาก mrolarik เพราะไม่มี license) |
+| D3 offline ONNX Thai | ยังไม่มีโมเดลที่ license เปิดและรันบน rten ได้; ใช้ tesseract `tha` แทน |
+| B3 justify / B5 PDF/UA tagging | ต่อยอดจาก segmentation ที่มีแล้ว แต่ยังไม่เริ่ม |
+| Edit text ไทย (ข้อความเดิมในหน้า) | ต้องออกแบบ cluster run splitting ใน `crates/edit` — งานใหญ่ |
+| วรรณยุกต์แทนที่ด้วย glyph อื่นจะผ่าน pixel test | ต้องมี golden image (ยืนยันรูปร่าง) ไม่ใช่แค่ pixel diff |
+
+
 > เป้าหมาย: ให้ PdfCraft Thai รองรับภาษาไทยครบทั้ง **การแสดง/แก้ไข/บันทึกข้อความไทย** และ **OCR ไทย**
 > โดยไม่ต้องพึ่งเครื่องมือภายนอกแบบบังคับ และไม่มีการกลายเป็น `?` ในทุกช่องทางที่ผู้ใช้พิมพ์ข้อความ
 
