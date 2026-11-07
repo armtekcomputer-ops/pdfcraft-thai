@@ -459,6 +459,35 @@ pub fn visible_text_layer_at(words: &[PlacedWord], plan: &pdfcraft_fonts::TextPl
     out
 }
 
+/// One WinAnsi word as invisible Helvetica text fitted to its box, without the `/OCR` wrapper:
+/// exactly the layout [`text_layer`] gives a word the standard-14 fonts can encode. Empty for a
+/// word with no measurable width or unusable geometry. The caller sets `/PCHelv` and `3 Tr`.
+pub fn win_ansi_word(w: &PlacedWord) -> Vec<u8> {
+    let width = helvetica_width(&w.text, 1.0);
+    let height = w.up[0].hypot(w.up[1]);
+    let across = w.across[0].hypot(w.across[1]);
+    if width <= 0.0
+        || !width.is_finite()
+        || !(height > 0.0 && height.is_finite())
+        || !(across > 0.0 && across.is_finite())
+        || !w.origin.iter().all(|v| v.is_finite())
+    {
+        return Vec::new();
+    }
+    let (top, bottom) = ink_extent(&w.text);
+    let em = [w.up[0] / (top - bottom), w.up[1] / (top - bottom)];
+    let o = [w.origin[0] - em[0] * bottom, w.origin[1] - em[1] * bottom];
+    let ax = [w.across[0] / width, w.across[1] / width];
+    let m = [ax[0], ax[1], em[0], em[1], o[0], o[1]];
+    let nums: Vec<String> = m.iter().map(|v| num(*v)).collect();
+    let mut out = b"/PCHelv 1 Tf ".to_vec();
+    out.extend_from_slice(nums.join(" ").as_bytes());
+    out.extend_from_slice(b" Tm ");
+    out.extend(pdfcraft_fonts::literal(&pdfcraft_fonts::win_ansi(&w.text)));
+    out.extend_from_slice(b" Tj\n");
+    out
+}
+
 /// Page content that writes `words` as invisible text (rendering mode 3), each word stretched
 /// to its box so selection and search highlight the right place. WinAnsi words are set in
 /// `/PCHelv` (standard Helvetica); words with characters beyond WinAnsi are set in the plan's
@@ -491,17 +520,8 @@ pub fn text_layer(words: &[PlacedWord], plan: &pdfcraft_fonts::TextPlan) -> Vec<
         let o = [w.origin[0] - em[0] * bottom, w.origin[1] - em[1] * bottom];
         match &runs {
             None => {
-                let ax = [w.across[0] / width, w.across[1] / width];
-                if current.as_ref().is_some_and(|(f, s)| f != "PCHelv" || *s != 1.0) {
-                    out.extend_from_slice(b"/PCHelv 1 Tf ");
-                    current = Some(("PCHelv".to_string(), 1.0));
-                }
-                let m = [ax[0], ax[1], em[0], em[1], o[0], o[1]];
-                let nums: Vec<String> = m.iter().map(|v| num(*v)).collect();
-                out.extend_from_slice(nums.join(" ").as_bytes());
-                out.extend_from_slice(b" Tm ");
-                out.extend(pdfcraft_fonts::literal(&pdfcraft_fonts::win_ansi(&w.text)));
-                out.extend_from_slice(b" Tj\n");
+                out.extend(win_ansi_word(w));
+                current = Some(("PCHelv".to_string(), 1.0));
             }
             Some((planned, total)) => {
                 for run in planned {

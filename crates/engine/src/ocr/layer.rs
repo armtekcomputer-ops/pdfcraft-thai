@@ -30,21 +30,38 @@ pub(crate) fn validate_words<'a>(words: impl IntoIterator<Item = &'a PlacedWord>
     Ok(count)
 }
 
+/// Whether `w` is a word WinAnsiEncoding can encode as is: the same predicate the text
+/// layer's fast path uses, so the two never disagree about which words need Type3 fonts.
+fn win_ansi_word(w: &PlacedWord) -> bool {
+    !w.text.is_empty() && w.text.chars().all(|c| pdfcraft_fonts::win_ansi_char(c).is_some())
+}
+
 pub(crate) fn add_text(doc: &mut Document, page: usize, words: &[PlacedWord]) -> Result<(), EditError> {
     validate_words(words)?;
-    // Keep the existing Latin layout, including Helvetica's proportional advance widths.
-    if words.iter().all(|w| {
-        w.text
-            .chars()
-            .all(|c| matches!(c, '\u{20}'..='\u{7e}' | '\u{a0}'..='\u{ff}' | '€' | '‚' | '„' | '…' | '‘' | '’' | '“' | '”' | '•' | '–' | '—' | '™'))
-    }) {
+    // Keep the existing Latin layout, including Helvetica's proportional advance widths, for
+    // every word WinAnsiEncoding can actually encode (the hand-written list this replaced left
+    // out Š Ž Œ œ Ÿ ƒ † ‡ ˆ ˜ ‰ ‹ ›, so one such word dragged the whole page onto Type3).
+    if words.iter().all(win_ansi_word) {
         pdfcraft_edit::stamp(doc, page, "OCR", pdfcraft_ocr::text_layer(words, &pdfcraft_fonts::TextPlan::default()))?;
         return Ok(());
     }
     let p = pdfcraft_model::pages(doc).get(page).cloned().ok_or_else(|| EditError::Invalid("OCR page does not exist".into()))?;
     let mut res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let mut fonts = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
-    let chars: Vec<char> = words.iter().flat_map(|w| w.text.chars()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    // A mixed page keeps Helvetica for the words WinAnsi can carry: `text_layer`'s layout
+    // expects `/PCHelv`, which an all-Unicode page never had to register before.
+    if words.iter().any(win_ansi_word) && fonts.get(b"PCHelv").is_none() {
+        let mut helv = Dict::new();
+        helv.set(b"Type".to_vec(), Object::name("Font"));
+        helv.set(b"Subtype".to_vec(), Object::name("Type1"));
+        helv.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
+        helv.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+        fonts.set(b"PCHelv".to_vec(), Object::Ref(doc.add(Object::Dict(helv))));
+    }
+    // Only the words Helvetica cannot encode need Type3 fonts and codes; a Latin word on a
+    // page that also carries Thai keeps Helvetica's proportional advances.
+    let chars: Vec<char> =
+        words.iter().filter(|w| !win_ansi_word(w)).flat_map(|w| w.text.chars()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     // Match the extractor's em box (-200..800). Baselines below are offset by 0.2 em,
     // so search/selection rectangles span the detected image box.
     let blank = doc.add(Object::Stream(Stream::from_raw(Dict::new(), b"1000 0 0 -200 1000 800 d1\n".to_vec())));
@@ -101,6 +118,12 @@ pub(crate) fn add_text(doc: &mut Document, page: usize, words: &[PlacedWord]) ->
     // rendering mode cannot leak into later content streams on the page.
     let mut content = String::from("/OCR BMC\nq\nBT\n3 Tr\n");
     for w in words {
+        // Words the standard-14 fonts carry are drawn with Helvetica's own advance widths; the
+        // uniform Type3 cells below would distort every Latin word on a mixed page.
+        if win_ansi_word(w) {
+            content.push_str(&String::from_utf8_lossy(&pdfcraft_ocr::win_ansi_word(w)));
+            continue;
+        }
         let count = w.text.chars().count();
         if count == 0 || w.up[0].hypot(w.up[1]) <= 0.0 || w.across[0].hypot(w.across[1]) <= 0.0 {
             continue;
@@ -301,6 +324,32 @@ mod tests {
         assert_eq!(shown.len(), 2, "the word continues in the second font");
         assert!(shown.iter().all(|(_, codes)| codes.iter().all(|c| *c != 0)), "code 0 is never emitted: {shown:?}");
         assert!(shown.iter().any(|(font, codes)| font == "PCOcr1" && codes.len() == 45), "{shown:?}");
+    }
+
+    /// A Latin word on a page that also carries Thai keeps Helvetica's proportional advances:
+    /// only the Thai word needs a Type3 font, and `/PCHelv` is registered for the Latin one.
+    #[test]
+    fn a_latin_word_beside_thai_keeps_helvetica() {
+        let mut doc = Document::new_empty();
+        page(&mut doc);
+        add_text(&mut doc, 0, &[placed("Hello"), placed("ไทย")]).expect("the layer is written");
+        let fonts = ocr_fonts(&doc);
+        assert_eq!(fonts.len(), 1, "only Thai needs Type3 cells: {:?}", fonts.iter().map(|(n, _)| n).collect::<Vec<_>>());
+        let shown = content(&doc);
+        assert!(shown.contains("/PCHelv 1 Tf"), "Helvetica is registered and used: {shown}");
+        assert!(shown.contains("Hello"), "the Latin word is written with Helvetica's own widths: {shown}");
+    }
+
+    /// Letters WinAnsiEncoding does carry stay on the Helvetica fast path. The hand-written
+    /// list this check replaced left out Š Ž Œ œ Ÿ ƒ † ‡ ˆ ˜ ‰ ‹ ›, so one such word dragged
+    /// the whole page onto uniform Type3 cells.
+    #[test]
+    fn cp1252_letters_win_ansi_can_encode_take_the_fast_path() {
+        let mut doc = Document::new_empty();
+        page(&mut doc);
+        add_text(&mut doc, 0, &[placed("ŠŽŒœŸƒ†‡ˆ˜‰‹›")]).expect("the layer is written");
+        assert!(ocr_fonts(&doc).is_empty(), "no Type3 font is needed for WinAnsi letters");
+        assert!(content(&doc).contains("/PCHelv 1 Tf"), "the fast path drew it");
     }
 
     /// A word with a zero-length box is skipped: nothing is shown for it, while a good word in
