@@ -10492,6 +10492,66 @@ fn fill_sign_multiline_text_survives_engine_save_reopen_and_render() {
     assert_eq!(before.rgba, render_page(&reopened, again).rgba, "the saved appearance is identical");
 }
 
+/// A one-page PDF whose only font is a simple Type1 with `encoding` and no `/ToUnicode`, as the
+/// legacy Thai producers write it. `content` is the page's content stream, so the caller controls
+/// the raw bytes in its strings.
+fn legacy_thai_fixture(encoding: &str, content: &[u8]) -> Vec<u8> {
+    // 32..=255: the Latin word and the Thai bytes (0xA1 onwards) both need a width, or the pen
+    // would not advance between them.
+    let widths = vec!["600"; 224].join(" ");
+    pdfcraft_testkit::Pdf::new()
+        .obj("<< /Type /Catalog /Pages 2 0 R >>")
+        .obj("<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 800] >>")
+        .obj("<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Resources << /Font << /F1 4 0 R >> >> >>")
+        .obj(format!("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 32 /LastChar 255 /Widths [{widths}] /Encoding /{encoding} >>"))
+        .stream("", content)
+        .build()
+}
+
+/// The text of the page as the engine's own extraction (`pdfcraft_fonts::pdf::Metrics`, through
+/// `Doc::text_lines`) reads it, one line per entry.
+fn extracted_lines(s: &Session, id: DocId) -> Vec<String> {
+    s.get(id).unwrap().text_lines(0).into_iter().map(|l| l.text).collect()
+}
+
+/// A legacy Thai PDF: `/Encoding /TIS-620` and no `/ToUnicode`. The bytes of "ภาษาไทย" must read
+/// as Thai, and the Latin line beside them must stay Latin. TIS-620: 0xC0=ภ, 0xD2=า, 0xC9=ษ,
+/// 0xE4=ไ, 0xB7=ท, 0xC2=ย.
+#[test]
+fn legacy_tis_620_font_extracts_thai_without_to_unicode() {
+    let content = b"BT /F1 12 Tf 72 720 Td <C0D2C9D2E4B7C2> Tj ET\nBT /F1 12 Tf 72 700 Td (Latin 2026) Tj ET";
+    let bytes = legacy_thai_fixture("TIS-620", content);
+    let mut s = Session::new();
+    let id = s.open("legacy-thai.pdf", None, Arc::new(bytes), None).unwrap();
+    assert_eq!(extracted_lines(&s, id), ["ภาษาไทย", "Latin 2026"]);
+}
+
+/// The same legacy Thai PDF through the renderer's text extraction, which is what copy and find
+/// use. `/Encoding /TIS-620` with no `/ToUnicode` must read as Thai, not as the Latin-1
+/// characters that happen to share those byte values (0xC0=À, 0xD2=Ò, …).
+#[test]
+fn legacy_tis_620_rendered_text_is_thai_not_mojibake() {
+    let content = b"BT /F1 12 Tf 72 720 Td <C0D2C9D2E4B7C2> Tj ET\nBT /F1 12 Tf 72 700 Td (Latin 2026) Tj ET";
+    let bytes = legacy_thai_fixture("TIS-620", content);
+    let mut s = Session::new();
+    let id = s.open("legacy-thai.pdf", None, Arc::new(bytes), None).unwrap();
+    let rendered = page_texts(&s, id).remove(0);
+    assert!(rendered.contains("ภาษาไทย"), "the renderer reads TIS-620 as Thai: {rendered:?}");
+    assert!(rendered.contains("Latin 2026"), "and keeps the Latin line: {rendered:?}");
+    assert!(!rendered.chars().any(|c| ('\u{a0}'..='\u{ff}').contains(&c)), "not a byte-for-codepoint fallback: {rendered:?}");
+}
+
+/// The Windows range of the same table: `/Encoding /CP874` makes 0x80 read as the euro sign
+/// (TIS-620 leaves that byte unassigned), and a Thai byte beside it still reads as Thai.
+#[test]
+fn legacy_cp874_font_extracts_the_euro_and_thai() {
+    let content = b"BT /F1 12 Tf 72 720 Td <80A1> Tj ET\nBT /F1 12 Tf 72 700 Td (Windows) Tj ET";
+    let bytes = legacy_thai_fixture("CP874", content);
+    let mut s = Session::new();
+    let id = s.open("legacy-cp874.pdf", None, Arc::new(bytes), None).unwrap();
+    assert_eq!(extracted_lines(&s, id), ["€ก", "Windows"]);
+}
+
 /// A whole tree goes in as one undoable step, and a refused tree changes nothing.
 #[test]
 fn imported_bookmarks_undo_in_one_step() {

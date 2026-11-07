@@ -1257,6 +1257,11 @@ fn unicode_map(doc: &Document, font: &Dict, composite: bool) -> Unicode {
             Some(b"WinAnsiEncoding") => Some(&crate::encodings::WIN_ANSI),
             Some(b"MacRomanEncoding") => Some(&crate::encodings::MAC_ROMAN),
             Some(b"StandardEncoding") => Some(&crate::encodings::STANDARD),
+            // Thai PDFs written by older tools name their single-byte encoding in several ways,
+            // none of them an Annex D base encoding. `WinAnsiEncoding-Thai` is a de-facto name
+            // some Thai fonts use for TIS-620 bytes, hence CP874 (TIS-620 plus Windows punctuation).
+            Some(b"TIS-620" | b"TIS620" | b"TIS620-2529") => Some(&crate::encodings::TIS_620),
+            Some(b"CP874" | b"WinAnsiEncoding-Thai") => Some(&crate::encodings::CP874),
             // MacExpert is small caps, oldstyle figures and fractions, not Latin at these codes,
             // and we hold no table for it either.
             Some(b"MacExpertEncoding") => None,
@@ -1451,6 +1456,56 @@ mod encoding_tests {
             let m = Metrics::from_dict(&doc, &d);
             assert_eq!(m.text_of(0x61).as_deref(), Some("a"), "{name} was asked for by name");
         }
+    }
+
+    #[test]
+    fn thai_legacy_encoding_names_decode_thai_bytes() {
+        // The names older Thai tools actually write, and which the PDF specification does not
+        // list. `WinAnsiEncoding-Thai` means TIS-620 bytes, so it is read as CP874 as well.
+        for name in ["TIS-620", "TIS620", "TIS620-2529", "CP874", "WinAnsiEncoding-Thai"] {
+            let (doc, d) = simple("Helvetica", None, Some(Object::name(name)));
+            let m = Metrics::from_dict(&doc, &d);
+            assert_eq!(m.text_of(0xa1).as_deref(), Some("\u{e01}"), "{name} 0xA1");
+            assert_eq!(m.text_of(0xe1).as_deref(), Some("\u{e41}"), "{name} 0xE1");
+            assert_eq!(m.text_of(0x41).as_deref(), Some("A"), "{name} keeps ASCII");
+            assert_eq!(m.decode(b"\xa1\xe1"), "\u{e01}\u{e41}", "{name}");
+        }
+    }
+
+    #[test]
+    fn tis_620_leaves_its_undefined_bytes_undefined() {
+        let (doc, d) = simple("Helvetica", None, Some(Object::name("TIS-620")));
+        let m = Metrics::from_dict(&doc, &d);
+        for code in [0xdb, 0xdc, 0xdd, 0xde, 0xfc, 0xfd, 0xfe, 0xff] {
+            assert_eq!(m.text_of(code), None, "0x{code:02X} is unassigned in TIS-620");
+        }
+        assert_eq!(m.text_of(0xdf).as_deref(), Some("\u{e3f}"), "0xDF starts the second run");
+    }
+
+    #[test]
+    fn a_differences_uni_name_wins_over_a_thai_table() {
+        // The encoding table is only the base: `/Differences` says what the font really draws.
+        let (doc, d) = simple(
+            "Helvetica",
+            None,
+            Some(differences(vec![Object::Int(0x41), Object::name("uni0E01"), Object::Int(0xa1), Object::name("uni0041")])),
+        );
+        let m = Metrics::from_dict(&doc, &d);
+        assert_eq!(m.text_of(0x41).as_deref(), Some("\u{e01}"), "the name beats ASCII 'A'");
+        assert_eq!(m.text_of(0xa1).as_deref(), Some("A"), "the name also beats the Thai table");
+
+        let (doc, d) = simple(
+            "Helvetica",
+            None,
+            Some(Object::Dict({
+                let mut enc = Dict::new();
+                enc.set(b"BaseEncoding".to_vec(), Object::name("TIS-620"));
+                enc.set(b"Differences".to_vec(), Object::Array(vec![Object::Int(0x41), Object::name("uni0E01")]));
+                enc
+            })),
+        );
+        let m = Metrics::from_dict(&doc, &d);
+        assert_eq!(m.text_of(0x41).as_deref(), Some("\u{e01}"), "over a named Thai base encoding");
     }
 
     /// The Annex D.2 alias codes read, through the whole decode path, as the ink they draw.

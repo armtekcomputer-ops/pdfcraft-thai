@@ -5,7 +5,7 @@ use crate::context::InterpreterCache;
 use crate::device::Device;
 use crate::font::cid::Type0Font;
 use crate::font::generated::{
-    glyph_names, mac_expert, mac_os_roman, mac_roman, standard, win_ansi,
+    cp874, glyph_names, mac_expert, mac_os_roman, mac_roman, standard, tis_620, win_ansi,
 };
 use crate::font::true_type::TrueTypeFont;
 use crate::font::type1::Type1Font;
@@ -428,6 +428,8 @@ enum Encoding {
     MacRoman,
     WinAnsi,
     MacExpert,
+    Tis620,
+    Cp874,
     BuiltIn,
 }
 
@@ -441,6 +443,8 @@ impl Encoding {
             Self::MacRoman => mac_roman::get(code).or_else(|| mac_os_roman::get(code)),
             Self::WinAnsi => win_ansi::get(code),
             Self::MacExpert => mac_expert::get(code),
+            Self::Tis620 => tis_620::get(code),
+            Self::Cp874 => cp874::get(code),
             Self::BuiltIn => None,
         }
     }
@@ -759,4 +763,38 @@ pub(crate) fn normalized_glyph_name(mut name: &str) -> &str {
     }
 
     name
+}
+
+#[cfg(test)]
+mod legacy_thai_tests {
+    use super::{Encoding, glyph_name_to_unicode};
+
+    #[test]
+    fn tis_620_maps_thai_and_leaves_its_holes_empty() {
+        assert_eq!(Encoding::Tis620.map_code(0xA1), Some("uni0E01"));
+        assert_eq!(
+            Encoding::Tis620
+                .map_code(0xA1)
+                .and_then(glyph_name_to_unicode),
+            Some('ก')
+        );
+        assert_eq!(Encoding::Tis620.map_code(0xDB), None);
+        assert_eq!(Encoding::Tis620.map_code(0xFC), None);
+        // Latin codes still come from WinAnsi.
+        assert_eq!(Encoding::Tis620.map_code(b'A'), Some("A"));
+    }
+
+    #[test]
+    fn cp874_adds_the_windows_punctuation_to_the_thai_table() {
+        assert_eq!(
+            Encoding::Cp874
+                .map_code(0x80)
+                .and_then(glyph_name_to_unicode),
+            Some('€')
+        );
+        assert_eq!(Encoding::Cp874.map_code(0x85), Some("uni2026"));
+        assert_eq!(Encoding::Cp874.map_code(0xA1), Some("uni0E01"));
+        // Bytes TIS-620 leaves unassigned stay unassigned here too.
+        assert_eq!(Encoding::Cp874.map_code(0xDB), None);
+    }
 }

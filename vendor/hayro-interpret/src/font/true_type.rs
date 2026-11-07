@@ -459,6 +459,14 @@ impl CacheKey for TrueTypeFont {
 }
 
 pub(crate) fn read_encoding(dict: &Dict<'_>) -> (Encoding, HashMap<u8, String>) {
+    // PdfCraft patch: the legacy Thai base encodings a Thai producer names in `/Encoding`.
+    // Names are matched as raw bytes like the Annex D ones in `hayro-syntax`.
+    const TIS_620: &[u8] = b"TIS-620";
+    const TIS620: &[u8] = b"TIS620";
+    const TIS620_2529: &[u8] = b"TIS620-2529";
+    const CP874: &[u8] = b"CP874";
+    const WIN_ANSI_ENCODING_THAI: &[u8] = b"WinAnsiEncoding-Thai";
+
     fn get_encoding_base(dict: &Dict<'_>, name: Name<'_>) -> Encoding {
         match dict.get::<Name<'_>>(name.as_ref()) {
             Some(n) => match n.deref() {
@@ -466,6 +474,8 @@ pub(crate) fn read_encoding(dict: &Dict<'_>) -> (Encoding, HashMap<u8, String>) 
                 MAC_ROMAN_ENCODING => Encoding::MacRoman,
                 MAC_EXPERT_ENCODING => Encoding::MacExpert,
                 STANDARD_ENCODING => Encoding::Standard,
+                TIS_620 | TIS620 | TIS620_2529 => Encoding::Tis620,
+                CP874 | WIN_ANSI_ENCODING_THAI => Encoding::Cp874,
                 _ => {
                     warn!("Unknown font encoding {}", name.as_str());
 

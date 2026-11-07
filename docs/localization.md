@@ -60,6 +60,10 @@ Catalog coverage does not guarantee glyph coverage. Native builds embed LXGW Wen
 
 German labels keep nouns capitalized, including tool names inserted into notices. The certificate viewer uses the `certificate` context for `Subject` (the certificate holder), while document properties keep the plain translation (the topic). Search hints reserve room for the shortcut, and Home cards limit their title and description to the available rows; hovering shows the full text when it is shortened.
 
+## Thai text
+
+Thai has no interface catalog, but older PDFs that store Thai in a single-byte font now decode. A simple font with no `/ToUnicode` whose `/Encoding` names `TIS-620`, `TIS620`, `TIS620-2529`, `CP874` or `WinAnsiEncoding-Thai` maps its bytes to Thai (U+0E01–U+0E5B) for extraction, find, copy and redaction, and `/Differences` still wins over the base table. A font that names `/WinAnsiEncoding` while actually storing TIS-620 bytes is not detected and still extracts as Latin.
+
 ## How translations work
 
 PdfCraft reads its translations from [craft-i18n](https://github.com/storytold/craft-i18n), shared by the Crafting Apps, through the `craft-i18n` crate (`crates/ui-egui/src/i18n.rs` is a thin wrapper):
