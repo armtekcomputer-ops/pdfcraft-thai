@@ -43,6 +43,14 @@ fn score_for_direction(hay: &str, needle: &str, rtl: bool) -> Option<usize> {
     needle.chars().all(|c| it.any(|x| x == c)).then_some(100)
 }
 
+/// A command's palette label: its live English label through the catalog, except the About item,
+/// which names this build rather than the registry's upstream word. The menu bar writes
+/// `About {app}` from the same catalog row with [`crate::APP_NAME`]; the palette does the same so
+/// both say "About PdfCraft Thai". The command id stays `help.about`.
+fn command_text(id: &str, label: &str) -> String {
+    if id == "help.about" { tl!("About {app}").replace("{app}", crate::APP_NAME) } else { crate::i18n::command_label(label) }
+}
+
 /// Draw the command palette and dispatch the chosen command or tool group.
 pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let palette_rect_id = egui::Id::unique("palette_rect");
@@ -59,7 +67,7 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let active = app.active_ids().map(|(_, id)| id);
     for spec in pdfcraft_engine::commands::COMMANDS {
         let label = pdfcraft_engine::commands::current_label(spec, &app.session, active);
-        let translated = crate::i18n::command_label(&label);
+        let translated = command_text(spec.id, &label);
         if let Some(s) = score(&translated, &q).or_else(|| score(&label, &q)).or_else(|| score(spec.id, &q).map(|s| s + 50)) {
             hits.push((
                 s,
@@ -233,8 +241,19 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
 
 #[cfg(test)]
 mod search {
-    use super::{score, score_for_direction};
+    use super::{command_text, score, score_for_direction};
     use pdfcraft_render::text::fold_case;
+
+    /// The palette's About row names this build, as the menu bar's does, from the same catalog
+    /// row; other commands keep their own catalog label.
+    #[test]
+    fn the_about_row_names_this_app() {
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        assert_eq!(command_text("help.about", "About PdfCraft"), format!("About {}", crate::APP_NAME));
+        assert_eq!(command_text("file.open", "Open…"), "Open…");
+        crate::i18n::set_current(previous);
+    }
 
     /// Word-order tolerance is RTL-only and still requires every requested word.
     #[test]

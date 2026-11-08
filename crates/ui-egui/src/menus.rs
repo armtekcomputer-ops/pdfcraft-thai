@@ -16,12 +16,9 @@ use pdfcraft_engine::commands::{self, Shortcut};
 
 use crate::canvas::{Fit, PageLayout};
 use crate::theme::ThemePreference;
-use crate::{PdfCraftApp, RightPanel};
+use crate::{APP_NAME, PdfCraftApp, RightPanel};
 
 pub(super) mod tab_context;
-
-/// The app's name in the menus the layouts write (About, Hide, Quit).
-pub(crate) const APP_NAME: &str = "PdfCraft";
 
 /// The top bar's width after the menus: the mode tabs, the search box and the buttons.
 const ROW_AFTER_MENUS: f32 = 720.0;

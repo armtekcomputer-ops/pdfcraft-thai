@@ -4,16 +4,16 @@
 //! Outlook attachments, Explorer double-clicks and Open With all start `pdfcraft.exe "<file>"`, and
 //! a file manager or `xdg-open` starts `pdfcraft <file>` the same way, so until now every file got
 //! its own process and window. The first PdfCraft listens on a Unix domain socket. On Windows (10
-//! 1803 and later) it is in `%LOCALAPPDATA%\PdfCraft`, or in the data folder of a portable copy,
-//! and is named after the Windows session (`instance-Console.sock`), so two sign-ins of the same
-//! user never open files in each other's windows. On Linux and the BSDs it is in
-//! `$XDG_RUNTIME_DIR/pdfcraft` and is named after the display (`instance-wayland-0.sock`), so a
-//! launch on another display or seat opens its own window there. Either way it lives in a folder
-//! only the user can reach, so other accounts can't create, replace or reach it: nobody else can
-//! intercept a launch or open files in this user's window. Inside a Flatpak, `$XDG_RUNTIME_DIR` is
-//! the app's own and is shared by every run of it, so the handoff works there too. The exchange is
-//! one line each way, a JSON request naming absolute paths and `ok`, and the running app opens the
-//! paths exactly as File ▸ Open would.
+//! 1803 and later) it is in `%LOCALAPPDATA%\pdfcraft-thai` (a portable copy uses the same folder,
+//! under its own name), and is named after the Windows session (`instance-Console.sock`), so two
+//! sign-ins of the same user never open files in each other's windows. On Linux and the BSDs it is
+//! in `$XDG_RUNTIME_DIR/pdfcraft-thai` and is named after the display (`instance-wayland-0.sock`),
+//! so a launch on another display or seat opens its own window there. Either way it lives in a
+//! folder only the user can reach, so other accounts can't create, replace or reach it: nobody else
+//! can intercept a launch or open files in this user's window. Inside a Flatpak, `$XDG_RUNTIME_DIR`
+//! is the app's own and is shared by every run of it, so the handoff works there too. The exchange
+//! is one line each way, a JSON request naming absolute paths and `ok`, and the running app opens
+//! the paths exactly as File ▸ Open would.
 //!
 //! Every failure falls back to the old behaviour: a launch that can't hand its files over within
 //! a few seconds opens its own window. `--new-window`, any other option, or no files at all also
@@ -149,8 +149,8 @@ pub fn claim(files: &[String], may_hand_off: bool) -> Claim {
     }
 }
 
-/// The socket in `%LOCALAPPDATA%\PdfCraft` (beside the crash-recovery folder); none when
-/// `%LOCALAPPDATA%` is unset.
+/// The socket in `%LOCALAPPDATA%\pdfcraft-thai` (beside the crash-recovery folder); none when
+/// `%LOCALAPPDATA%` is unset or relative.
 #[cfg(windows)]
 fn socket_path() -> Option<std::path::PathBuf> {
     let name = socket_name(session_id(), std::env::var("SESSIONNAME").ok().as_deref());
@@ -159,18 +159,36 @@ fn socket_path() -> Option<std::path::PathBuf> {
     // own name so it never hands files to an installed copy (which keeps its settings elsewhere).
     // Never the portable folder itself: it may sit where other accounts can write (`C:\Tools`).
     let name = if pdfcraft_ui_egui::portable::data_dir().is_some() { format!("portable-{name}") } else { name };
-    std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(|d| std::path::PathBuf::from(d).join("PdfCraft").join(name))
+    socket_path_in(std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(std::path::PathBuf::from).as_deref(), &name)
 }
 
-/// The socket in `$XDG_RUNTIME_DIR/pdfcraft`; none when `$XDG_RUNTIME_DIR` is unset. Never `/tmp`
-/// instead: other accounts can create files there, and so could listen in this user's place.
+/// The socket in `$XDG_RUNTIME_DIR/pdfcraft-thai`; none when `$XDG_RUNTIME_DIR` is unset or
+/// relative. Never `/tmp` instead: other accounts can create files there, and so could listen in
+/// this user's place. The folder is `pdfcraft-thai` (not `pdfcraft`) so this build never hands its
+/// files to an installed PdfCraft, which keeps its own socket and settings.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn socket_path() -> Option<std::path::PathBuf> {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let name = display_socket_name(var("WAYLAND_DISPLAY").or_else(|| var("DISPLAY")).as_deref());
     // The XDG base directory spec makes it the user's own (mode 0700), so the folder inside it is
     // out of other accounts' reach whatever the umask.
-    var("XDG_RUNTIME_DIR").map(|d| std::path::PathBuf::from(d).join("pdfcraft").join(name))
+    socket_path_in(var("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).as_deref(), &name)
+}
+
+/// The socket at `name` under `base` (`$XDG_RUNTIME_DIR` on Linux and the BSDs, `%LOCALAPPDATA%` on
+/// Windows), or none without an absolute base: a relative one would put the socket in the working
+/// folder, where another account could watch or replace it.
+#[cfg_attr(not(any(windows, all(unix, not(target_os = "macos")))), allow(dead_code))]
+fn socket_path_in(base: Option<&std::path::Path>, name: &str) -> Option<std::path::PathBuf> {
+    base.filter(|p| p.is_absolute()).map(|base| socket_dir_in(base).join(name))
+}
+
+/// The private folder the single-instance socket lives in, under `base` (`$XDG_RUNTIME_DIR` on
+/// Linux and the BSDs, `%LOCALAPPDATA%` on Windows): [`pdfcraft_ui_egui::PRODUCT_DIR`], never
+/// `pdfcraft`, so this build never hands its files to an installed PdfCraft.
+#[cfg_attr(not(any(windows, all(unix, not(target_os = "macos")))), allow(dead_code))]
+fn socket_dir_in(base: &std::path::Path) -> std::path::PathBuf {
+    base.join(pdfcraft_ui_egui::PRODUCT_DIR)
 }
 
 /// The socket's file name for a display (`WAYLAND_DISPLAY`, else `DISPLAY`): a launch opens its
@@ -404,6 +422,32 @@ mod tests {
         let events = poll();
         assert!(matches!(events.as_slice(), [OsEvent::Open(p)] if p == &["a.pdf", "b.pdf"]));
         assert!(poll().is_empty(), "each file is delivered once");
+    }
+
+    #[test]
+    fn this_builds_socket_lives_in_its_own_folder() {
+        let dir = socket_dir_in(std::path::Path::new("/run/user/1000"));
+        assert_eq!(dir, std::path::PathBuf::from("/run/user/1000/pdfcraft-thai"));
+        let path = dir.join(display_socket_name(Some("wayland-0")));
+        assert_eq!(path, std::path::PathBuf::from("/run/user/1000/pdfcraft-thai/instance-wayland-0.sock"));
+        assert!(path.components().all(|c| c.as_os_str() != "pdfcraft" && c.as_os_str() != "PdfCraft"), "never upstream PdfCraft's folder: {path:?}");
+    }
+
+    #[test]
+    fn a_relative_runtime_folder_yields_no_socket() {
+        // A relative $XDG_RUNTIME_DIR (or %LOCALAPPDATA%) would put the socket in the working
+        // folder, where another account could watch or replace it.
+        assert_eq!(socket_path_in(Some(std::path::Path::new("run/user/1000")), "instance-0.sock"), None);
+        assert_eq!(socket_path_in(None, "instance-0.sock"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_runtime_folder_holds_the_socket() {
+        assert_eq!(
+            socket_path_in(Some(std::path::Path::new("/run/user/1000")), "instance-0.sock"),
+            Some(std::path::PathBuf::from("/run/user/1000/pdfcraft-thai/instance-0.sock"))
+        );
     }
 
     #[test]

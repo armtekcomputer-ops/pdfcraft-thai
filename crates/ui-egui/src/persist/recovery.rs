@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::PdfCraftApp;
+use crate::paths::{self, Platform};
 
 /// How often unsaved changes are written to the recovery folder.
 pub const AUTOSAVE_SECS: f64 = 60.0;
@@ -164,21 +165,15 @@ impl RecoveryStore {
     }
 
     /// `Recovery` in the portable data folder in portable mode ([`crate::portable`]), otherwise
-    /// the platform's per-user data folder: `~/Library/Application Support/PdfCraft/Recovery`
-    /// (macOS), `%LOCALAPPDATA%\PdfCraft\Recovery` (Windows), or
-    /// `$XDG_DATA_HOME/pdfcraft/recovery` / `~/.local/share/pdfcraft/recovery` (others).
+    /// the platform's per-user data folder: `~/Library/Application Support/pdfcraft-thai/Recovery`
+    /// (macOS), `%LOCALAPPDATA%\pdfcraft-thai\Recovery` (Windows), or
+    /// `$XDG_DATA_HOME/pdfcraft-thai/recovery` / `~/.local/share/pdfcraft-thai/recovery` (others).
     pub fn default_dir() -> Option<PathBuf> {
         if let Some(dir) = crate::portable::data_dir() {
             return Some(dir.join("Recovery"));
         }
         let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-        if cfg!(target_os = "macos") {
-            env("HOME").map(|h| h.join("Library/Application Support/PdfCraft/Recovery"))
-        } else if cfg!(windows) {
-            env("LOCALAPPDATA").map(|d| d.join("PdfCraft").join("Recovery"))
-        } else {
-            env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share"))).map(|d| d.join("pdfcraft/recovery"))
-        }
+        recovery_dir_in(Platform::current(), env("HOME").as_deref(), env("XDG_DATA_HOME").as_deref(), env("LOCALAPPDATA").as_deref())
     }
 
     pub fn dir(&self) -> &Path {
@@ -186,22 +181,29 @@ impl RecoveryStore {
     }
 }
 
+/// [`RecoveryStore::default_dir`] for explicit platform and environment values, so tests check
+/// every platform's formula without touching the process environment (`set_var` is unsafe in
+/// edition 2024).
+fn recovery_dir_in(platform: Platform, home: Option<&Path>, xdg_data_home: Option<&Path>, local_app_data: Option<&Path>) -> Option<PathBuf> {
+    paths::data_base(platform, home, xdg_data_home, local_app_data).map(|base| paths::product_dir_in(platform, &base, "Recovery"))
+}
+
 /// The OCR Verify screen's per-language user dictionary folder, next to the recovery store:
 /// the portable data folder's `Dictionary` in portable mode ([`crate::portable`]), otherwise
-/// `…/PdfCraft/Dictionary` in the platform's per-user data folder. `None` where files are not
-/// kept (the web build).
+/// `…/pdfcraft-thai/Dictionary` in the platform's per-user data folder. `None` where files are
+/// not kept (the web build).
 pub fn default_dictionary_dir() -> Option<PathBuf> {
     if let Some(dir) = crate::portable::data_dir() {
         return Some(dir.join("Dictionary"));
     }
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    if cfg!(target_os = "macos") {
-        env("HOME").map(|h| h.join("Library/Application Support/PdfCraft/Dictionary"))
-    } else if cfg!(windows) {
-        env("LOCALAPPDATA").map(|d| d.join("PdfCraft").join("Dictionary"))
-    } else {
-        env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share"))).map(|d| d.join("pdfcraft/dictionary"))
-    }
+    dictionary_dir_in(Platform::current(), env("HOME").as_deref(), env("XDG_DATA_HOME").as_deref(), env("LOCALAPPDATA").as_deref())
+}
+
+/// [`default_dictionary_dir`] for explicit platform and environment values, so tests check every
+/// platform's formula without touching the process environment.
+fn dictionary_dir_in(platform: Platform, home: Option<&Path>, xdg_data_home: Option<&Path>, local_app_data: Option<&Path>) -> Option<PathBuf> {
+    paths::data_base(platform, home, xdg_data_home, local_app_data).map(|base| paths::product_dir_in(platform, &base, "Dictionary"))
 }
 
 impl RecoveryStore {
@@ -611,5 +613,82 @@ mod idle_tests {
             }
             assert_eq!(delay, Duration::MAX);
         }
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// An absolute path on whatever machine runs the tests: the helpers only join folder names
+    /// onto a base, and `is_absolute` is a host question.
+    fn absolute(tag: &str) -> PathBuf {
+        if cfg!(windows) { PathBuf::from(format!(r"C:\{tag}")) } else { PathBuf::from(format!("/{tag}")) }
+    }
+
+    fn no_upstream_folder(path: &Path) {
+        assert!(
+            path.components().all(|c| c.as_os_str() != "pdfcraft" && c.as_os_str() != "PdfCraft"),
+            "{path:?} must not name upstream PdfCraft's folder"
+        );
+    }
+
+    #[test]
+    fn recovery_lives_in_this_builds_own_folder_on_every_platform() {
+        let home = absolute("home/someone");
+        let local = absolute("local/appdata");
+        let data = absolute("var/lib/someone");
+        let (home, local, data) = (home.as_path(), local.as_path(), data.as_path());
+        assert_eq!(recovery_dir_in(Platform::Unix, Some(home), None, None), Some(home.join(".local/share/pdfcraft-thai/recovery")));
+        assert_eq!(recovery_dir_in(Platform::Unix, None, Some(data), None), Some(data.join("pdfcraft-thai/recovery")), "XDG_DATA_HOME as it is");
+        assert_eq!(recovery_dir_in(Platform::MacOs, Some(home), None, None), Some(home.join("Library/Application Support/pdfcraft-thai/Recovery")));
+        assert_eq!(recovery_dir_in(Platform::Windows, None, None, Some(local)), Some(local.join("pdfcraft-thai").join("Recovery")));
+        assert_eq!(recovery_dir_in(Platform::Windows, Some(home), None, None), None, "Windows uses %LOCALAPPDATA%, not HOME");
+        for dir in [
+            recovery_dir_in(Platform::Unix, Some(home), None, None),
+            recovery_dir_in(Platform::MacOs, Some(home), None, None),
+            recovery_dir_in(Platform::Windows, None, None, Some(local)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            no_upstream_folder(&dir);
+        }
+    }
+
+    #[test]
+    fn dictionary_lives_beside_recovery_in_this_builds_own_folder_on_every_platform() {
+        let home = absolute("home/someone");
+        let local = absolute("local/appdata");
+        let (home, local) = (home.as_path(), local.as_path());
+        assert_eq!(dictionary_dir_in(Platform::Unix, Some(home), None, None), Some(home.join(".local/share/pdfcraft-thai/dictionary")));
+        assert_eq!(
+            dictionary_dir_in(Platform::MacOs, Some(home), None, None),
+            Some(home.join("Library/Application Support/pdfcraft-thai/Dictionary"))
+        );
+        assert_eq!(dictionary_dir_in(Platform::Windows, None, None, Some(local)), Some(local.join("pdfcraft-thai").join("Dictionary")));
+        assert_eq!(
+            dictionary_dir_in(Platform::MacOs, Some(home), None, None).unwrap().parent(),
+            recovery_dir_in(Platform::MacOs, Some(home), None, None).unwrap().parent()
+        );
+        for dir in [
+            dictionary_dir_in(Platform::Unix, Some(home), None, None),
+            dictionary_dir_in(Platform::MacOs, Some(home), None, None),
+            dictionary_dir_in(Platform::Windows, None, None, Some(local)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            no_upstream_folder(&dir);
+        }
+    }
+
+    #[test]
+    fn a_relative_data_home_is_ignored_and_home_is_used_instead() {
+        let home = absolute("home/someone");
+        let relative = Path::new("relative/base");
+        assert_eq!(recovery_dir_in(Platform::Unix, Some(&home), Some(relative), None), Some(home.join(".local/share/pdfcraft-thai/recovery")));
+        assert_eq!(dictionary_dir_in(Platform::Unix, Some(&home), Some(relative), None), Some(home.join(".local/share/pdfcraft-thai/dictionary")));
+        assert_eq!(recovery_dir_in(Platform::Unix, Some(relative), None, None), None, "relative HOME is ignored");
     }
 }

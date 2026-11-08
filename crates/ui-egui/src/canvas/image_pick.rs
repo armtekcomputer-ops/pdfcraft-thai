@@ -90,10 +90,10 @@ pub(crate) fn safe_name(s: &str) -> String {
 
 /// The per-user folder that holds the file of the last Copy Image in Original Format: `Clipboard`
 /// in the portable data folder in portable mode ([`crate::portable`]), otherwise the platform's
-/// per-user cache folder: `~/Library/Caches/PdfCraft/Clipboard` (macOS),
-/// `%LOCALAPPDATA%\PdfCraft\Clipboard` (Windows), or `$XDG_CACHE_HOME/pdfcraft/clipboard` /
-/// `~/.cache/pdfcraft/clipboard` (others). Never the shared temporary folder, where another user
-/// could plant a link or a folder of their own.
+/// per-user cache folder: `~/Library/Caches/pdfcraft-thai/Clipboard` (macOS),
+/// `%LOCALAPPDATA%\pdfcraft-thai\Clipboard` (Windows), or `$XDG_CACHE_HOME/pdfcraft-thai/clipboard`
+/// / `~/.cache/pdfcraft-thai/clipboard` (others). Never the shared temporary folder, where another
+/// user could plant a link or a folder of their own.
 #[cfg(not(target_arch = "wasm32"))]
 fn clipboard_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
@@ -101,13 +101,19 @@ fn clipboard_dir() -> Option<std::path::PathBuf> {
         return Some(dir.join("Clipboard"));
     }
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from).filter(|p| p.is_absolute());
-    if cfg!(target_os = "macos") {
-        env("HOME").map(|h| h.join("Library/Caches/PdfCraft/Clipboard"))
-    } else if cfg!(windows) {
-        env("LOCALAPPDATA").map(|d| d.join("PdfCraft").join("Clipboard"))
-    } else {
-        env("XDG_CACHE_HOME").or_else(|| env("HOME").map(|h| h.join(".cache"))).map(|d| d.join("pdfcraft/clipboard"))
-    }
+    clipboard_dir_in(crate::paths::Platform::current(), env("HOME").as_deref(), env("XDG_CACHE_HOME").as_deref(), env("LOCALAPPDATA").as_deref())
+}
+
+/// [`clipboard_dir`] for explicit platform and environment values, so tests check every platform's
+/// formula without touching the process environment (`set_var` is unsafe in edition 2024).
+#[cfg(not(target_arch = "wasm32"))]
+fn clipboard_dir_in(
+    platform: crate::paths::Platform,
+    home: Option<&std::path::Path>,
+    xdg_cache_home: Option<&std::path::Path>,
+    local_app_data: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    crate::paths::cache_base(platform, home, xdg_cache_home, local_app_data).map(|base| crate::paths::product_dir_in(platform, &base, "Clipboard"))
 }
 
 /// Whether `name` is a file Copy Image in Original Format writes: `<stem> p<page> img<index>.<ext>`
@@ -242,7 +248,7 @@ impl PdfCraftApp {
 mod tests {
     use super::safe_name;
     #[cfg(not(target_arch = "wasm32"))]
-    use super::{is_copied_image_name, write_clipboard_file};
+    use super::{clipboard_dir_in, is_copied_image_name, write_clipboard_file};
 
     #[test]
     fn file_names_are_safe() {
@@ -260,6 +266,47 @@ mod tests {
         assert!(!is_copied_image_name("Report p1 img2.pdf"));
         assert!(!is_copied_image_name(" p1 img2.png"));
         assert!(!is_copied_image_name("Report px img2.png"));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn clipboard_cache_lives_in_this_builds_own_folder_on_every_platform() {
+        use crate::paths::Platform;
+        use std::path::PathBuf;
+        // An absolute path on whatever machine runs the tests: the helper only joins folder names
+        // onto a base, and `is_absolute` is a host question.
+        let absolute = |tag: &str| {
+            if cfg!(windows) { PathBuf::from(format!(r"C:\{tag}")) } else { PathBuf::from(format!("/{tag}")) }
+        };
+        let home = absolute("home/someone");
+        let local = absolute("local/appdata");
+        let cache = absolute("var/cache/someone");
+        assert_eq!(clipboard_dir_in(Platform::Unix, Some(&home), None, None), Some(home.join(".cache/pdfcraft-thai/clipboard")));
+        assert_eq!(
+            clipboard_dir_in(Platform::Unix, None, Some(&cache), None),
+            Some(cache.join("pdfcraft-thai/clipboard")),
+            "XDG_CACHE_HOME as it is"
+        );
+        assert_eq!(clipboard_dir_in(Platform::MacOs, Some(&home), None, None), Some(home.join("Library/Caches/pdfcraft-thai/Clipboard")));
+        assert_eq!(clipboard_dir_in(Platform::Windows, None, None, Some(&local)), Some(local.join("pdfcraft-thai").join("Clipboard")));
+        for dir in [
+            clipboard_dir_in(Platform::Unix, Some(&home), None, None),
+            clipboard_dir_in(Platform::MacOs, Some(&home), None, None),
+            clipboard_dir_in(Platform::Windows, None, None, Some(&local)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                dir.components().all(|c| c.as_os_str() != "pdfcraft" && c.as_os_str() != "PdfCraft"),
+                "{dir:?} must not name upstream PdfCraft's folder"
+            );
+        }
+        assert_eq!(
+            clipboard_dir_in(Platform::Unix, Some(&home), Some(std::path::Path::new("relative/cache")), None),
+            Some(home.join(".cache/pdfcraft-thai/clipboard")),
+            "a relative XDG_CACHE_HOME is ignored"
+        );
     }
 
     #[test]

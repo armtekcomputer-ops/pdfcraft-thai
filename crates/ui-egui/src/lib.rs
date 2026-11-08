@@ -9,6 +9,19 @@
 // The settings object in `persist` is one `json!` literal past the default limit of 128.
 #![recursion_limit = "256"]
 
+/// Folder name for this build's per-user files: preferences, recents, logs, crash recovery, the
+/// OCR dictionary, digital IDs and the clipboard cache. Deliberately not `pdfcraft`/`PdfCraft`, so
+/// this build's per-user files stay separate from PdfCraft's. Packaged installs still share the
+/// app id (`ai.storyteller.pdfcraft`), the installer and the desktop entry until packaging
+/// changes; portable mode also keeps `PdfCraftData` beside the executable.
+pub const PRODUCT_DIR: &str = "pdfcraft-thai";
+
+/// The name the window title, the web page title and the menu bar show. Branding only: the
+/// machine ids stay as they are (the update asset stem and bundle id are `pdfcraft`, see
+/// `UPDATE_APP`; the per-user folder is `PRODUCT_DIR`), so nothing that reads files or compares
+/// asset names may use this.
+pub const APP_NAME: &str = "PdfCraft Thai";
+
 /// PdfCraft as craft-update knows it, with its 128 px icon and accent colour: the update
 /// prompt shows both, and an AppImage's menu entry gets the icon.
 #[cfg(not(target_arch = "wasm32"))]
@@ -76,8 +89,13 @@ pub use recovery::{AUTOSAVE_SECS, RecoveryMeta, RecoveryStore, default_dictionar
 use theme::{ThemeKind, ThemePreference};
 pub use workflows::ocr_verify::{OcrVerify, Phase};
 
+/// Folders an earlier PdfCraft left per-user files in, when they still hold files: a start-up note
+/// names them, as this build does not import another app's data.
+pub use paths::upstream_dirs_with_files;
+
 mod app;
 mod hooks;
+mod paths;
 mod persist;
 mod platform;
 mod state;

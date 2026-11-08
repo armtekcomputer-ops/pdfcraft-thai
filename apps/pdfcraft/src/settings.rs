@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use pdfcraft_ui_egui::PRODUCT_DIR;
+
 static STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn directory(
@@ -20,7 +22,7 @@ pub fn directory(
     }
     // XDG requires absolute environment paths; empty and relative overrides are ignored.
     let preferred = config_home.filter(|p| p.is_absolute()).or_else(|| home.filter(|p| p.is_absolute()).map(|p| p.join(".config")));
-    let Some(preferred) = preferred.map(|p| p.join("pdfcraft-thai")) else { return Ok(legacy) };
+    let Some(preferred) = preferred.map(|p| p.join(PRODUCT_DIR)) else { return Ok(legacy) };
     let target = preferred.join("app.ron");
     if std::fs::symlink_metadata(&target).is_ok() {
         return Ok(Some(preferred));
@@ -34,6 +36,60 @@ pub fn directory(
         }
     }
     Ok(Some(preferred))
+}
+
+/// The folder `app.ron` is read from and saved to: [`directory`]'s choice, or `data` (this build's
+/// per-user data folder) when the platform has no configuration base, so a launch without
+/// `HOME`/`XDG_CONFIG_HOME` still saves preferences instead of silently dropping them.
+///
+/// The fallback folder is made owner-only even when it already exists: the logger runs first and
+/// creates it with the umask, and preferences are private.
+///
+/// No legacy source is passed: this build starts with its own preferences rather than importing
+/// another PdfCraft's recents and settings.
+pub fn preferences_dir(
+    xdg: bool,
+    portable: Option<&Path>,
+    data: Option<PathBuf>,
+    config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> std::io::Result<Option<PathBuf>> {
+    if let Some(dir) = directory(xdg, portable, None, config_home, home)? {
+        return Ok(Some(dir));
+    }
+    match data {
+        Some(dir) => {
+            create_private_directory(&dir)?;
+            tighten_private(&dir);
+            Ok(Some(dir))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The per-user data folder to keep logs and fallback preferences in: `data` when it is absolute.
+/// eframe filters a relative `XDG_DATA_HOME` but not a relative `HOME`, and a relative folder
+/// would put preferences and logs in the working directory.
+pub fn data_dir(data: Option<PathBuf>) -> Option<PathBuf> {
+    data.filter(|d| d.is_absolute())
+}
+
+/// Make an existing folder owner-only on Unix. [`create_private_directory`] leaves an existing
+/// folder's permissions alone, but the data folder may already exist because the logger made it
+/// with the umask. A volume that can't change modes (FAT, some network shares) works as before,
+/// with one warning in the log.
+fn tighten_private(directory: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let open_to_others = std::fs::metadata(directory).is_ok_and(|m| m.permissions().mode() & 0o077 != 0);
+        if open_to_others && let Err(e) = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)) {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| log::warn!("preferences folder {} can't be made owner-only: {e}", directory.display()));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = directory;
 }
 
 /// Create private configuration directories without changing existing directory permissions.
@@ -178,6 +234,65 @@ mod tests {
         }
         assert_eq!(directory(false, None, Some(f.0.clone()), Some(portable), None).unwrap(), Some(f.0.clone()));
         assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 0, "no migration outside XDG mode");
+    }
+
+    #[test]
+    fn preferences_dir_falls_back_to_the_data_folder_without_a_configuration_base() {
+        let f = Fixture::new();
+        let data = f.0.join("data/pdfcraft-thai");
+        // Neither XDG_CONFIG_HOME nor HOME: `directory` names no folder. Preferences must still
+        // go somewhere (the data folder eframe uses), not be dropped.
+        assert_eq!(preferences_dir(true, None, Some(data.clone()), None, None).unwrap(), Some(data.clone()));
+        assert!(data.is_dir(), "the fallback folder is created");
+        assert_eq!(preferences_dir(true, None, None, None, None).unwrap(), None, "nothing to fall back to");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_data_folder_fallback_is_private_like_the_xdg_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let selected = preferences_dir(true, None, Some(f.0.join("data/pdfcraft-thai")), None, None).unwrap().unwrap();
+        assert_eq!(std::fs::metadata(&selected).unwrap().permissions().mode() & 0o077, 0, "only the owner may open the preferences folder");
+    }
+
+    /// The logger runs before the settings are read and creates the data folder with the umask;
+    /// the fallback must still end owner-only.
+    #[cfg(unix)]
+    #[test]
+    fn the_data_folder_fallback_tightens_a_folder_the_logger_made() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let data = f.0.join("data/pdfcraft-thai");
+        std::fs::create_dir_all(data.join("logs")).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let selected = preferences_dir(true, None, Some(data.clone()), None, None).unwrap().unwrap();
+        assert_eq!(selected, data);
+        assert_eq!(std::fs::metadata(&selected).unwrap().permissions().mode() & 0o777, 0o700, "the fallback folder is tightened");
+        assert!(selected.join("logs").is_dir(), "the logger's folder is untouched");
+    }
+
+    #[test]
+    fn a_relative_data_folder_is_ignored() {
+        let f = Fixture::new();
+        assert_eq!(data_dir(Some(PathBuf::from("relative/data"))), None);
+        assert_eq!(data_dir(None), None);
+        assert_eq!(data_dir(Some(f.0.clone())), Some(f.0.clone()), "an absolute data folder is kept");
+    }
+
+    #[test]
+    fn preferences_dir_never_imports_another_pdfcrafts_settings() {
+        let f = Fixture::new();
+        let home = f.0.join("home");
+        // An upstream PdfCraft's data folder, with preferences in it.
+        let upstream = home.join(".local/share/pdfcraft");
+        std::fs::create_dir_all(&upstream).unwrap();
+        std::fs::write(upstream.join("app.ron"), b"(theme:Dark)").unwrap();
+        let selected = preferences_dir(true, None, Some(upstream.clone()), None, Some(home.clone())).unwrap().unwrap();
+        assert_eq!(selected, home.join(".config/pdfcraft-thai"));
+        assert!(selected.ends_with("pdfcraft-thai"), "this build's own folder: {}", selected.display());
+        assert!(!selected.join("app.ron").exists(), "nothing is imported from another PdfCraft");
+        assert_eq!(std::fs::read(upstream.join("app.ron")).unwrap(), b"(theme:Dark)", "the other app's file is untouched");
     }
 
     #[cfg(unix)]

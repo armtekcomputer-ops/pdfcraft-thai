@@ -30,6 +30,14 @@ impl Default for PdfCraftApp {
     }
 }
 
+/// The window (and, on the web, the page) title for a document: its name, the unsaved mark and
+/// the app's name. With nothing open it is the app's name alone; the combine screen is named
+/// while it is showing. Split out so the branding is tested once, without a window.
+fn titled(name: Option<String>, mark: &str, combining: bool) -> String {
+    name.or_else(|| combining.then(|| tl!("Combine files").to_owned()))
+        .map_or_else(|| crate::APP_NAME.to_owned(), |name| format!("{name}{mark} — {}", crate::APP_NAME))
+}
+
 impl PdfCraftApp {
     /// The window's title and, on the web, the page's, from the active document (#3640). Done in
     /// `logic` too, which also runs while the window or browser tab is hidden: a document opened
@@ -40,10 +48,8 @@ impl PdfCraftApp {
         // what closing would ask about, so a draft not yet applied counts too.
         let dirty = self.active.is_some_and(|i| self.has_unsaved_work(i));
         let mark = if dirty { " •" } else { "" };
-        let titled = |name: Option<String>| {
-            name.or_else(|| self.combine_showing().then(|| tl!("Combine files").to_owned()))
-                .map_or_else(|| "PdfCraft".to_owned(), |name| format!("{name}{mark} — PdfCraft"))
-        };
+        let combining = self.combine_showing();
+        let titled = |name: Option<String>| titled(name, mark, combining);
         let title = titled(self.active.and_then(|i| crate::canvas::tab_label(self, i)));
         // The web page's title is what an embedding host reads to tell which file opened, so it
         // names the file even when the document asks to show its own title.
@@ -746,5 +752,22 @@ impl eframe::App for PdfCraftApp {
             control.finish_frame(&ctx, self);
             self.control = Some(control);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window says this fork's name: the app's name alone with nothing open, the document's
+    /// name before it with ` — `, and the unsaved mark before the dash. The combine screen is
+    /// named while it shows, as before.
+    #[test]
+    fn the_window_title_names_this_fork() {
+        assert_eq!(titled(None, "", false), crate::APP_NAME);
+        assert_eq!(titled(Some("report.pdf".into()), "", false), format!("report.pdf — {}", crate::APP_NAME));
+        assert_eq!(titled(Some("report.pdf".into()), " •", false), format!("report.pdf • — {}", crate::APP_NAME));
+        assert_eq!(titled(None, "", true), format!("{} — {}", tl!("Combine files"), crate::APP_NAME));
+        assert!(crate::APP_NAME.contains("Thai"), "the window title must tell the fork from upstream PdfCraft");
     }
 }
