@@ -840,6 +840,20 @@ impl OcrVerify {
         matches!(self.phase, Phase::Idle | Phase::ReviewReady | Phase::RecoverableError)
     }
 
+    /// Why the next run cannot start: the draft's engine must be able to read the draft's
+    /// language. The toolbar disables Run with this and [`Self::start_run`] refuses with it, so a
+    /// shortcut or the control channel cannot start a run that `select()` would only fail.
+    fn run_refusal(&self, draft: &super::ocr_ui::OcrDraft) -> Option<String> {
+        pdfcraft_engine::ocr::engine_unavailable_reason(draft.engine, &draft.language)
+    }
+
+    /// Why a re-read cannot start: it reads with the review's captured language, not the
+    /// draft's (the language may have changed since the words were read), and the engine choice
+    /// must be able to read that.
+    fn reread_refusal(&self, draft: &super::ocr_ui::OcrDraft) -> Option<String> {
+        pdfcraft_engine::ocr::engine_unavailable_reason(draft.engine, &self.dictionary_language)
+    }
+
     /// Start re-reading a whole page (`region` `None`) or a drawn region on a WORKER THREAD:
     /// the UI thread only builds the job and refuses an empty or out-of-page region BEFORE
     /// anything runs — the render, the recognition and the engine probe (a `--list-langs`
@@ -848,6 +862,10 @@ impl OcrVerify {
     pub fn start_reread(&mut self, app: &mut PdfCraftApp, page: usize, region: Option<[f32; 4]>) {
         if self.phase != Phase::ReviewReady || self.reread.is_some() {
             return; // one re-read at a time, and never under a run
+        }
+        if let Some(why) = self.reread_refusal(&app.ocr_draft) {
+            app.notify_error(&why);
+            return;
         }
         let Some(doc) = self.doc else { return };
         let settings = self.reread_settings(&app.ocr_draft);
@@ -1074,6 +1092,13 @@ impl OcrVerify {
         if self.reread.is_some() {
             return; // the page re-read in flight replaces these words; one worker at a time
         }
+        if let Some(why) = self.run_refusal(&app.ocr_draft) {
+            // A persisted choice the engine cannot run (PaddleOCR + Japanese, Automatic +
+            // Japanese without Tesseract) never reaches `recognizers`, which would only fail
+            // the run: say why and leave the review (if any) as it is.
+            app.notify_error(&why);
+            return;
+        }
         if let Some(why) = app.session.get(id).and_then(|d| d.read_only_reason.clone()) {
             self.message = why;
             self.phase = Phase::RecoverableError;
@@ -1273,7 +1298,7 @@ fn toolbar(app: &mut PdfCraftApp, ui: &mut egui::Ui, n: &mut Intents) {
     let v = &app.ocr_verify;
     let d = &mut app.ocr_draft;
     let review = v.phase == Phase::ReviewReady;
-    let run_enabled = v.can_run() && v.reread.is_none();
+    let run_enabled = v.can_run() && v.reread.is_none() && v.run_refusal(d).is_none();
     let accept_enabled = review && v.word_count() + v.review.applied_pages.len() > 0;
 
     // Row 1: the settings (each written back into the persisted draft).
@@ -1283,7 +1308,7 @@ fn toolbar(app: &mut PdfCraftApp, ui: &mut egui::Ui, n: &mut Intents) {
                 ui.selectable_value(&mut d.language, (*code).to_string(), *name);
             }
         });
-        engine_combo(ui, &mut d.engine, &mut d.strategy);
+        engine_combo(ui, &mut d.engine, &mut d.strategy, &d.language);
         strategy_combo(ui, &mut d.strategy);
         output_combo(ui, &mut d.output_mode);
         for (flag, label, why) in [
@@ -1379,11 +1404,12 @@ fn strategy_label(strategy: MergeStrategy) -> &'static str {
     }
 }
 
-/// The Engine dropdown: Automatic, ocrs, Tesseract. An engine that cannot run is disabled and
-/// says why (a tooltip names the missing models or program). The choice feeds the next run.
-/// Choosing Automatic while the strategy is "Primary only" (which would never run the second
-/// engine) moves the strategy to Automatic's own default, Confidence weighted.
-fn engine_combo(ui: &mut egui::Ui, engine: &mut EngineChoice, strategy: &mut MergeStrategy) {
+/// The Engine dropdown: Automatic, ocrs, Tesseract, PaddleOCR. An engine that cannot run is
+/// disabled and says why (a tooltip names the missing models or program, or that PaddleOCR
+/// reads Thai only). The choice feeds the next run. Choosing Automatic while the strategy is
+/// "Primary only" (which would never run the second engine) moves the strategy to Automatic's
+/// own default, Confidence weighted.
+fn engine_combo(ui: &mut egui::Ui, engine: &mut EngineChoice, strategy: &mut MergeStrategy, language: &str) {
     ocr_ui::keep_asking_while_probing(ui.ctx());
     craft_ui::ComboBox::from_id_salt("ocr-verify-engine").width(120.0).selected_text(engine_label(*engine)).show_ui(ui, |ui| {
         for (choice, label) in [
@@ -1392,7 +1418,7 @@ fn engine_combo(ui: &mut egui::Ui, engine: &mut EngineChoice, strategy: &mut Mer
             (EngineChoice::Tesseract, "Tesseract"),
             (EngineChoice::Paddle, tl!("PaddleOCR (Thai)")),
         ] {
-            let why = pdfcraft_engine::ocr::engine_unavailable_reason(choice);
+            let why = pdfcraft_engine::ocr::engine_unavailable_reason(choice, language);
             let resp = ui.add_enabled(why.is_none(), egui::Button::selectable(*engine == choice, label));
             let clicked = resp.clicked();
             match why {
@@ -1619,11 +1645,12 @@ fn source_pane(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, n: &mut Int
     }
     resp.context_menu(|ui| {
         let rereading = app.ocr_verify.reread.is_some();
-        if ui.add_enabled(review && !rereading && app.ocr_verify.region.is_some(), egui::Button::new(tl!("Re-OCR this region"))).clicked() {
+        let reread_ready = review && !rereading && app.ocr_verify.reread_refusal(&app.ocr_draft).is_none();
+        if ui.add_enabled(reread_ready && app.ocr_verify.region.is_some(), egui::Button::new(tl!("Re-OCR this region"))).clicked() {
             n.reocr_region = true;
             ui.close();
         }
-        if ui.add_enabled(review && !rereading, egui::Button::new(tl!("Re-OCR entire page"))).clicked() {
+        if ui.add_enabled(reread_ready, egui::Button::new(tl!("Re-OCR entire page"))).clicked() {
             n.reocr_page = true;
             ui.close();
         }
@@ -2442,6 +2469,27 @@ mod tests {
         assert_eq!(app.ocr_verify.phase, Phase::ReviewReady, "the review survives a failed re-read");
         assert_eq!(app.ocr_verify.page(0).expect("page").words.len(), 1, "the words survive");
         assert!(!toast(&mut app).is_empty(), "the failure is said");
+    }
+
+    /// A stale persisted engine choice (PaddleOCR + Japanese here) is not a run: `select()`
+    /// would refuse it, so Run and the re-read refuse it first and say why, and the review is
+    /// left exactly as it was.
+    #[test]
+    fn a_stale_unavailable_engine_does_not_start_a_run() {
+        let (mut app, _) = app_review(vec![vec![word("one", Some(95.0))]]);
+        app.ocr_draft.engine = EngineChoice::Paddle;
+        app.ocr_draft.language = "ja".into();
+        with_state(&mut app, |v, app| assert!(v.run_refusal(&app.ocr_draft).is_some(), "Run is disabled with the reason"));
+        with_state(&mut app, OcrVerify::start_run);
+        assert_eq!(app.ocr_verify.phase, Phase::ReviewReady, "no run started; the review is intact");
+        let why = toast(&mut app);
+        assert!(why.contains("Thai only") && why.contains("Japanese"), "{why}");
+        // A re-read reads with the language the review captured (English here): the stale
+        // PaddleOCR choice is refused there too, before a worker starts.
+        app.ocr_draft.language = "th".into();
+        with_state(&mut app, |v, app| v.start_reread(app, 0, None));
+        assert!(app.ocr_verify.reread.is_none(), "no re-read started");
+        assert!(toast(&mut app).contains("Thai only"), "the stale engine is named");
     }
 
     /// A re-read that finds nothing is a typed failure: the words stay, the review stays.

@@ -132,4 +132,47 @@ mod tests {
         assert_eq!(RELEASES_PAGE, "https://github.com/armtekcomputer-ops/pdfcraft-thai/releases");
         assert_eq!(crate::UPDATE_APP.releases_url(), RELEASES_PAGE);
     }
+
+    /// The published Linux asset is matched by `craft_update`'s own parser: its stem is the app
+    /// id, `pdfcraft`, and the platform token is Linux x86_64. The updater would silently find
+    /// nothing if the release used a `pdfcraft-thai-` prefix, so the asset names are pinned here.
+    #[test]
+    fn the_published_linux_asset_is_accepted_under_the_app_id() {
+        // The app id is the asset stem the updater strips before reading the version: renaming
+        // it to "pdfcraft-thai" would make `pdfcraft-<v>-linux-x86_64.tar.gz` match nothing (and
+        // force renaming every published asset in the same release).
+        assert_eq!(crate::UPDATE_APP.id, "pdfcraft");
+
+        let name = "pdfcraft-0.18.1-linux-x86_64.tar.gz";
+        let parsed = craft_update::platform::parse_asset_name(name, &[crate::UPDATE_APP.id]).expect("the published asset matches the app id");
+        assert_eq!(parsed.stem, "pdfcraft");
+        assert_eq!(parsed.version, "0.18.1");
+        assert_eq!(parsed.token, "linux-x86_64");
+        assert_eq!(parsed.kind, craft_update::PackageKind::TarGz);
+
+        // The updater's own selection path (`pick_asset`) finds that asset for the kind the
+        // install was made as. Production passes the detected install's kind (the tarball, an
+        // AppImage, a .deb, …), never every kind Linux offers.
+        use craft_update::release::{Asset, Release};
+        use craft_update::{Arch, Os, PackageKind, Platform};
+        let platform = Platform { os: Os::Linux, arch: Arch::X64 };
+        let asset = |name: &str| Asset { name: name.into(), size: 1, url: format!("https://example.invalid/{name}"), sha256: None };
+        let appimage = "pdfcraft-0.18.1-linux-x86_64.AppImage";
+        let release = Release { assets: vec![asset(name), asset(appimage)], ..Release::default() };
+        let (picked, kind) =
+            craft_update::pick_asset(&release, &[crate::UPDATE_APP.id], platform, &[PackageKind::TarGz]).expect("the published tarball is found");
+        assert_eq!(picked.name, name);
+        assert_eq!(kind, PackageKind::TarGz, "a Linux x86_64 tarball updates a tarball install");
+        // The AppImage is published beside the tarball and is picked for an AppImage install.
+        let (picked, kind) =
+            craft_update::pick_asset(&release, &[crate::UPDATE_APP.id], platform, &[PackageKind::AppImage]).expect("the published AppImage is found");
+        assert_eq!(picked.name, appimage);
+        assert_eq!(kind, PackageKind::AppImage, "the AppImage name parses and is picked for an AppImage install");
+
+        // The same file under the fork's display name is not an asset the updater can see.
+        assert!(
+            craft_update::platform::parse_asset_name("pdfcraft-thai-0.18.1-linux-x86_64.tar.gz", &[crate::UPDATE_APP.id]).is_none(),
+            "a pdfcraft-thai prefix must not be used for release assets"
+        );
+    }
 }

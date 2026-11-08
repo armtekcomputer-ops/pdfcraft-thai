@@ -115,8 +115,9 @@ pub struct OcrSettings {
     /// Resolution pages are rendered at for recognition (Acrobat's "Downsample to" choices).
     pub dpi: f32,
     /// Language code from [`OFFERED_LANGUAGES`]. The built-in ocrs engine reads only
-    /// [`LANGUAGES`] (the Latin alphabet): another offered language, Thai included, needs the
-    /// Tesseract engine and is refused rather than silently read as English.
+    /// [`LANGUAGES`], which is English alone: another offered language, Thai and the Latin-script
+    /// German/French/Spanish/Italian/Portuguese/Dutch included, needs the Tesseract engine and is
+    /// refused rather than silently read as English.
     pub language: String,
     /// Leave pages that already have text alone (Acrobat reports "page contains renderable
     /// text" and skips them). When `false`, such pages are read too (a picture on a page that
@@ -577,14 +578,28 @@ fn configured_tesseract(settings: &OcrSettings) -> Option<String> {
     settings.tesseract_path.clone().or_else(|| std::env::var_os("PDFCRAFT_TESSERACT").map(|v| v.to_string_lossy().into_owned()))
 }
 
+/// Whether a language code is Thai: the one language PaddleOCR's only recognition model reads.
+/// Public so the OCR dialogs gate their PaddleOCR choice on the same test the engine selects
+/// with.
+pub fn is_thai(language: &str) -> bool {
+    language.trim().eq_ignore_ascii_case("th")
+}
+
 /// The English name of an offered language the built-in ocrs models cannot read, `None` when
-/// they can (or when the code is not one the app offers). ocrs reads [`LANGUAGES`] — the Latin
-/// alphabet — so Thai and the rest of [`OFFERED_LANGUAGES`] must go to Tesseract: a language is
-/// never silently passed to a reader that cannot read it.
+/// they can (or when the code is not one the app offers). ocrs reads [`LANGUAGES`], which is
+/// English alone, so every other [`OFFERED_LANGUAGES`] entry — the Latin-script ones included —
+/// must go to Tesseract: a language is never silently passed to a reader that cannot read it.
 fn ocrs_cannot_read(language: &str) -> Option<&'static str> {
     let code = language.trim();
     let (_, name) = OFFERED_LANGUAGES.iter().find(|(c, _)| c.eq_ignore_ascii_case(code))?;
     (!LANGUAGES.iter().any(|(c, _)| c.eq_ignore_ascii_case(code))).then_some(*name)
+}
+
+/// Whether the built-in ocrs models can read `language`: English only (an unknown code is not
+/// refused here, as `select()` does not refuse it either). Public so the OCR dialogs can say why
+/// a non-English choice is unavailable instead of showing the missing-models notice.
+pub fn ocrs_reads(language: &str) -> bool {
+    ocrs_cannot_read(language).is_none()
 }
 
 /// Why a language needs Tesseract, named for the user (and the language pack to install).
@@ -606,7 +621,7 @@ pub fn recognizers(settings: &OcrSettings) -> Result<Recognizers, String> {
     let language = settings.language.trim();
     // PaddleOCR reads Thai, and is the more accurate Thai reader: it is the engine Automatic
     // leads with there. Every other language never touches it.
-    let thai = language.eq_ignore_ascii_case("th");
+    let thai = is_thai(language);
     // The Tesseract probe (a `--list-langs` process) runs before any static mutex is taken, so
     // recognition on other threads is never blocked behind someone's discovery. A job that
     // names its engines never starts it: only Tesseract and Automatic read anything from it,
@@ -624,19 +639,35 @@ pub fn recognizers(settings: &OcrSettings) -> Result<Recognizers, String> {
         // Cheap to re-attempt while the models are missing; expensive work is cached forever.
         cache.ocrs = pdfcraft_ocr::OcrsRecognizer::find().ok().map(|r| Arc::new(r) as Arc<dyn Recognizer>);
     }
-    // Loading a model is expensive, so it is attempted only for a choice that can use it and
-    // remembered for the session. A missing set is not remembered (the file check is cheap and
-    // the models may be installed while the app runs); a failed load is, with its reason.
-    #[cfg(not(target_arch = "wasm32"))]
-    if thai && matches!(settings.engine, EngineChoice::Paddle | EngineChoice::Auto) && cache.paddle.is_none() {
-        match paddle_probe(pdfcraft_ocr::PaddleRecognizer::find()) {
-            PaddleProbe::Missing => {}
-            probe => cache.paddle = Some(probe),
-        }
-    }
     let ocrs = cache.ocrs.clone();
-    let paddle = cache.paddle.clone().unwrap_or(PaddleProbe::Missing);
+    let cached_paddle = cache.paddle.clone();
     drop(slot);
+    // Loading the Paddle ONNX models is expensive (seconds, tens of megabytes), so like the
+    // Tesseract probe it runs outside the static mutex: another thread's recognition is never
+    // blocked behind a first Thai job's model load. It is attempted only for a choice that can
+    // use it and remembered for the session. Two callers racing the first Thai job may both
+    // load; the last write wins and both answers are valid. A missing set is not remembered
+    // (the file check is cheap and the models may be installed while the app runs); a failed
+    // load is, with its reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    let paddle = match cached_paddle {
+        Some(probe) => probe,
+        None if thai && matches!(settings.engine, EngineChoice::Paddle | EngineChoice::Auto) => {
+            match paddle_probe(pdfcraft_ocr::PaddleRecognizer::find()) {
+                PaddleProbe::Missing => PaddleProbe::Missing,
+                probe => {
+                    ENGINES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(EngineCache::default).paddle = Some(probe.clone());
+                    probe
+                }
+            }
+        }
+        None => PaddleProbe::Missing,
+    };
+    #[cfg(target_arch = "wasm32")]
+    let paddle = {
+        let _ = cached_paddle;
+        PaddleProbe::Missing
+    };
     select(settings.engine, language, ocrs, tesseract, paddle)
 }
 
@@ -650,7 +681,7 @@ fn select(
     paddle: PaddleProbe,
 ) -> Result<Recognizers, String> {
     let code = language.trim();
-    let thai = code.eq_ignore_ascii_case("th");
+    let thai = is_thai(code);
     let non_latin = ocrs_cannot_read(code);
     match engine {
         EngineChoice::Ocrs => {
@@ -682,7 +713,13 @@ fn select(
                 };
             }
             // PaddleOCR cannot read this language: Automatic never offers it here, whatever
-            // availability says.
+            // availability says. The built-in models read English alone, so every other
+            // language — Thai, Russian, Chinese, Japanese, Korean, Arabic, and the Latin-script
+            // German, French, Spanish, Italian, Portuguese and Dutch — has no reader but
+            // Tesseract here: Automatic must not fall back to the English-only models.
+            if let Some(name) = non_latin {
+                return tesseract.map(|primary| Recognizers { primary, secondary: None }).ok_or_else(|| needs_tesseract(name, code));
+            }
             match (ocrs, tesseract) {
                 (Some(p), s) => Ok(Recognizers { primary: p, secondary: s }),
                 (None, Some(p)) => Ok(Recognizers { primary: p, secondary: None }),
@@ -754,9 +791,12 @@ pub fn available() -> bool {
     Models::find().is_some() || tesseract_engine(configured.as_deref()).is_some()
 }
 
-/// Why `engine` cannot run right now, named for the UI's tooltips (the Engine dropdown
-/// disables the choice with this text); `None` when it can. The app UI has no Tesseract
-/// location field of its own, so this judges the environment variable, exactly like
+/// Why `engine` cannot run right now for `language`, named for the UI's tooltips (the Engine
+/// dropdown disables the choice with this text); `None` when it can. Availability is about the
+/// engines that can read *that* language, not one engine: Thai is read by PaddleOCR and
+/// Tesseract (never the Latin-only ocrs models), so Automatic there needs one of those two,
+/// and an explicit PaddleOCR choice is unusable for any other language. The app UI has no
+/// Tesseract location field of its own, so this judges the environment variable, exactly like
 /// [`available`] (no tool takes a per-job location either; `OcrSettings::tesseract_path` is
 /// for library callers, and [`recognizers`] validates it on its own).
 ///
@@ -764,7 +804,7 @@ pub fn available() -> bool {
 /// cached ([`NEGATIVE_TTL`] for a missing engine, refreshed in the background), and until the
 /// first Tesseract probe lands the choice reads as "still checking" (see
 /// [`engine_probe_running`], to ask for another frame meanwhile).
-pub fn engine_unavailable_reason(engine: EngineChoice) -> Option<String> {
+pub fn engine_unavailable_reason(engine: EngineChoice, language: &str) -> Option<String> {
     let ocrs = models_installed_cached();
     let paddle = paddle_models_installed_cached();
     #[cfg(not(target_arch = "wasm32"))]
@@ -778,14 +818,51 @@ pub fn engine_unavailable_reason(engine: EngineChoice) -> Option<String> {
     };
     #[cfg(target_arch = "wasm32")]
     let tesseract: Result<(), String> = Err(tesseract_unavailable());
+    unavailable_reason(engine, language, ocrs, paddle, tesseract)
+}
+
+/// [`engine_unavailable_reason`]'s decision from what the probes found: pure, so the tests can
+/// pin every language/engine combination without a model file or a process.
+fn unavailable_reason(engine: EngineChoice, language: &str, ocrs: bool, paddle: bool, tesseract: Result<(), String>) -> Option<String> {
     match engine {
-        EngineChoice::Ocrs => (!ocrs).then(models_missing),
-        EngineChoice::Tesseract => tesseract.err(),
-        EngineChoice::Paddle => (!paddle).then(paddle_missing),
-        EngineChoice::Auto => match (ocrs, tesseract) {
-            (true, _) | (false, Ok(())) => None,
-            (false, Err(why)) => Some(format!("{}; {why}", models_missing())),
+        EngineChoice::Ocrs => match ocrs_cannot_read(language) {
+            // The built-in models read English only: another language is refused by name, so
+            // the choice is unavailable whatever its model files say.
+            Some(name) => Some(needs_tesseract(name, language.trim())),
+            None => (!ocrs).then(models_missing),
         },
+        EngineChoice::Tesseract => tesseract.err(),
+        EngineChoice::Paddle => {
+            // PaddleOCR's recognition model reads Thai only: the choice is unusable (and the
+            // dialog offers it as disabled) for every other language.
+            if !is_thai(language) {
+                return Some(paddle_reads_thai_only(language_name(language)));
+            }
+            (!paddle).then(paddle_missing)
+        }
+        EngineChoice::Auto if is_thai(language) => match (paddle, tesseract) {
+            // Automatic leads Thai with PaddleOCR and keeps Tesseract as the second opinion;
+            // either one alone can still read it (see [`select`]).
+            (true, _) | (false, Ok(())) => None,
+            (false, Err(why)) => Some(format!("{}; {why}", paddle_missing())),
+        },
+        EngineChoice::Auto => {
+            // Non-Thai Automatic reads ocrs + Tesseract where ocrs can read the language (English
+            // only), but every other language — the Latin-script German, French, Spanish,
+            // Italian, Portuguese and Dutch as well as Thai, Russian, Chinese, Japanese, Korean
+            // and Arabic — is Tesseract's alone: without it the choice is unavailable instead of
+            // quietly reading English-model noise.
+            if let Some(name) = ocrs_cannot_read(language) {
+                return match tesseract {
+                    Ok(()) => None,
+                    Err(why) => Some(format!("{}; {why}", needs_tesseract(name, language.trim()))),
+                };
+            }
+            match (ocrs, tesseract) {
+                (true, _) | (false, Ok(())) => None,
+                (false, Err(why)) => Some(format!("{}; {why}", models_missing())),
+            }
+        }
     }
 }
 
@@ -1860,6 +1937,61 @@ mod tests {
         // An offered language beyond Thai gets its own name; an unknown code keeps its spelling.
         assert!(refusal(select(EngineChoice::Paddle, "ja", None, None, paddle("paddle"))).contains("Japanese"));
         assert!(refusal(select(EngineChoice::Paddle, "xx", None, None, paddle("paddle"))).contains("xx"));
+    }
+
+    /// Automatic for Thai needs one of the two readers that can read the script: PaddleOCR's
+    /// models or Tesseract. With neither, the choice is unavailable and names both, rather than
+    /// the Latin-only ocrs models' notice; either one alone is enough.
+    #[test]
+    fn thai_automatic_reports_the_engines_that_can_read_it() {
+        let neither = unavailable_reason(EngineChoice::Auto, "th", true, false, Err(tesseract_unavailable())).unwrap();
+        assert!(neither.contains("Paddle Thai models"), "{neither}");
+        assert!(neither.contains("tesseract"), "{neither}");
+        assert!(
+            unavailable_reason(EngineChoice::Auto, "th", false, true, Err(tesseract_unavailable())).is_none(),
+            "PaddleOCR's models alone can read Thai"
+        );
+        assert!(unavailable_reason(EngineChoice::Auto, "th", false, false, Ok(())).is_none(), "Tesseract alone can read Thai");
+        // A language ocrs models can read never consults the Thai readers.
+        assert!(unavailable_reason(EngineChoice::Auto, "en", true, false, Err(tesseract_unavailable())).is_none());
+    }
+
+    /// The built-in models read English only: an explicit ocrs choice for Japanese (or German)
+    /// is refused by name, and Automatic there needs Tesseract instead of falling back to the
+    /// English-only models.
+    #[test]
+    fn a_language_the_builtin_models_cannot_read_needs_tesseract_even_when_automatic() {
+        let why = unavailable_reason(EngineChoice::Ocrs, "ja", true, false, Ok(())).unwrap();
+        assert!(why.contains("Japanese") && why.contains("Tesseract"), "{why}");
+        let why = unavailable_reason(EngineChoice::Auto, "ja", true, false, Err(tesseract_unavailable())).unwrap();
+        assert!(why.contains("Japanese") && why.contains("Tesseract"), "{why}");
+        assert!(unavailable_reason(EngineChoice::Auto, "ja", true, false, Ok(())).is_none(), "Tesseract reads Japanese");
+        // A Latin-script language is equally unreadable by the English-only models: a German
+        // interface's default OCR language needs Tesseract too.
+        let why = unavailable_reason(EngineChoice::Ocrs, "de", true, false, Ok(())).unwrap();
+        assert!(why.contains("German") && why.contains("Tesseract"), "{why}");
+        assert!(unavailable_reason(EngineChoice::Auto, "de", true, false, Ok(())).is_none(), "Tesseract reads German");
+
+        let engine = |id: &'static str| Some(Arc::new(Fake::named(id)) as Arc<dyn Recognizer>);
+        let auto = select(EngineChoice::Auto, "ja", engine("ocrs"), engine("tesseract"), PaddleProbe::Missing).unwrap();
+        assert_eq!(auto.primary.id(), "tesseract", "Automatic never sends Japanese to the Latin-only models");
+        assert!(auto.secondary.is_none(), "there is no second reader for Japanese");
+        let none = refusal(select(EngineChoice::Auto, "ja", engine("ocrs"), None, PaddleProbe::Missing));
+        assert!(none.contains("Japanese") && none.contains("Tesseract"), "{none}");
+        // The explicit choice refuses it the same way even with the models installed.
+        assert!(refusal(select(EngineChoice::Ocrs, "ja", engine("ocrs"), engine("tesseract"), PaddleProbe::Missing)).contains("Japanese"));
+    }
+
+    /// The PaddleOCR choice is unusable for every language but Thai: the dialogs disable it
+    /// with that reason instead of letting a Recognize run fail, and a persisted Paddle draft
+    /// that was switched to another language says why instead of offering the run.
+    #[test]
+    fn paddle_is_unavailable_for_a_non_thai_language() {
+        let why = unavailable_reason(EngineChoice::Paddle, "en", true, true, Ok(())).unwrap();
+        assert!(why.contains("Thai only") && why.contains("English"), "{why}");
+        assert!(unavailable_reason(EngineChoice::Paddle, "th", true, true, Ok(())).is_none(), "Thai with the models installed is usable");
+        let missing = unavailable_reason(EngineChoice::Paddle, "th", true, false, Ok(())).unwrap();
+        assert!(missing.contains("are not installed"), "{missing}");
     }
 
     /// An ocrs-only choice never starts the Tesseract probe: the probe is a `--list-langs`

@@ -287,7 +287,17 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
                     (EngineChoice::Tesseract, "Tesseract"),
                     (EngineChoice::Paddle, "PaddleOCR (Thai)"),
                 ];
+                let paddle_ok = pdfcraft_engine::ocr::is_thai(&d.language);
                 for (choice, name) in choices {
+                    if choice == EngineChoice::Paddle && !paddle_ok {
+                        // Offered, but only as a disabled entry: its one model reads Thai, so
+                        // picking it for another language could only fail at the run. The
+                        // persisted choice stays marked as selected.
+                        ui.add_enabled(false, egui::Button::selectable(d.engine == EngineChoice::Paddle, tl!(name))).on_disabled_hover_text(tl!(
+                            "PaddleOCR reads Thai only; choose Thai as the document language, or Tesseract for this one"
+                        ));
+                        continue;
+                    }
                     ui.selectable_value(&mut d.engine, choice, tl!(name));
                 }
             });
@@ -367,11 +377,20 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
         });
     });
     keep_asking_while_probing(ui.ctx());
-    if let Some(why) = pdfcraft_engine::ocr::engine_unavailable_reason(d.engine) {
+    let ocrs_reads = pdfcraft_engine::ocr::ocrs_reads(&d.language);
+    let unavailable = pdfcraft_engine::ocr::engine_unavailable_reason(d.engine, &d.language);
+    if let Some(why) = &unavailable {
         // Said in the interface's language: the built-in engine's missing models get the
-        // notice users know; Tesseract's reasons are catalog keys of their own.
+        // notice users know; the other engines' reasons are catalog keys of their own.
         let text = match d.engine {
-            pdfcraft_engine::ocr::EngineChoice::Tesseract => crate::i18n::t(&why).to_string(),
+            EngineChoice::Tesseract => crate::i18n::t(why).to_string(),
+            // PaddleOCR's reason names its three model files (the fetch command) or says it
+            // reads Thai only: both are actionable, unlike the built-in models' notice.
+            EngineChoice::Paddle => crate::i18n::t(why).to_string(),
+            // The built-in models read English alone: for another language the reason names
+            // the engine that can read it, so the notice about their files would mislead.
+            EngineChoice::Ocrs if !ocrs_reads => crate::i18n::t(why).to_string(),
+            EngineChoice::Auto if !ocrs_reads => crate::i18n::t(why).to_string(),
             _ => tl!("Text recognition isn't installed: its model files are missing. Reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them.")
                 .to_string(),
         };
@@ -380,7 +399,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     }
     ui.add_space(6.0);
     let (mut go, mut cancel) = (false, false);
-    let can_run = pdfcraft_engine::ocr::engine_unavailable_reason(d.engine).is_none();
+    let can_run = unavailable.is_none();
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui.add_enabled_ui(can_run, |ui| widgets::pill_button(ui, tl!("Recognize text"), true)).inner.clicked() {
@@ -428,7 +447,7 @@ impl PdfCraftApp {
         let Some(scan) = self.scan_to_read() else { return };
         // the engine this run will use, not always the built-in one
         let mut settings = self.ocr_draft.settings();
-        if pdfcraft_engine::ocr::engine_unavailable_reason(settings.engine).is_some() {
+        if pdfcraft_engine::ocr::engine_unavailable_reason(settings.engine, &settings.language).is_some() {
             self.views[scan.view].auto_ocr_skipped.insert(scan.page, scan.generation);
             return;
         }
@@ -1277,6 +1296,21 @@ mod tests {
         assert_eq!(restored.engine, EngineChoice::Paddle, "the dialog comes back on PaddleOCR");
         assert_eq!(restored.settings().engine, EngineChoice::Paddle, "and a run reads with it");
         assert_eq!(restored.strategy, MergeStrategy::PrimaryOnly, "a named engine reads alone");
+    }
+
+    /// The Engine dropdown offers PaddleOCR only for Thai: its one model reads Thai, and a
+    /// non-Thai choice could only fail after Recognize. The test is the engine's own predicate,
+    /// so the dialog and the selection cannot disagree. A draft restored on PaddleOCR with
+    /// another language reports the engine as unavailable instead.
+    #[test]
+    fn paddleocr_is_offered_for_thai_alone() {
+        assert!(pdfcraft_engine::ocr::is_thai("th"));
+        assert!(pdfcraft_engine::ocr::is_thai(" TH "), "the language codes are compared case- and space-insensitively");
+        assert!(!pdfcraft_engine::ocr::is_thai("en"));
+        assert!(!pdfcraft_engine::ocr::is_thai("ja"));
+        let draft = OcrDraft { language: "ja".into(), engine: EngineChoice::Paddle, ..Default::default() };
+        let why = pdfcraft_engine::ocr::engine_unavailable_reason(draft.engine, &draft.language).expect("PaddleOCR cannot read Japanese");
+        assert!(why.contains("Thai only") && why.contains("Japanese"), "{why}");
     }
 
     /// Two inputs of one file name (from different folders, or differing only in case) would
