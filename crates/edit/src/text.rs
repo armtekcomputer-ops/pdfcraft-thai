@@ -20,6 +20,31 @@ use pdfcraft_fonts::{CraftFont, GlyphError, japanese_glyph_from};
 
 use crate::EditError;
 
+/// The text matrix to draw a replaced line with.
+///
+/// A recognizer fits each word of an invisible layer into its picture's box, so its text matrix
+/// scales the two axes independently (`8.16 0 0 23.72` for a 23.7 pt line: a third of the width
+/// and none of the height lost). A replacement is real text in a real font, whose advances the
+/// layout already measured at the line's size; keeping the fitted matrix squeezes every glyph to
+/// the recognized word's width, which turned edited Thai scans into overlapping strokes. Only
+/// invisible text (`Tr 3`) is corrected: a visible document's own horizontal scaling is a design
+/// choice and stays.
+pub(crate) fn ocr_fit_matrix(tm: [f64; 6], render_mode: i64) -> [f64; 6] {
+    if render_mode != 3 {
+        return tm;
+    }
+    let (across, down) = (tm[0].hypot(tm[1]), tm[2].hypot(tm[3]));
+    if !(across.is_finite() && down.is_finite()) || across <= 1e-9 || down <= 1e-9 {
+        return tm;
+    }
+    if (across - down).abs() <= down * 1e-3 {
+        return tm;
+    }
+    // Keep the baseline's direction, but give the line the height's own scale.
+    let fit = down / across;
+    [tm[0] * fit, tm[1] * fit, tm[2], tm[3], tm[4], tm[5]]
+}
+
 #[path = "text_regions.rs"]
 mod regions;
 #[path = "text_session.rs"]

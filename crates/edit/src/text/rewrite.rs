@@ -7,7 +7,7 @@ use super::interp::{Carry, Origin, TextState, interpret};
 use super::lines::{content_streams, page_dict, rewritten_contents, splice, text_lines};
 use super::{
     Dict, Document, EditError, HashMap, Matrix, Metrics, Object, Op, PdfString, Pieces, TextLine, TextSession, alignment_frame, group_blocks,
-    is_centred, parse, rewrite_styled_block,
+    is_centred, ocr_fit_matrix, parse, rewrite_styled_block,
 };
 
 /// What replacing a line did.
@@ -444,11 +444,13 @@ fn drawn_movement(ctm: [f64; 6], dx: f64, dy: f64) -> Result<Option<(f64, f64)>,
 
 /// The paragraph's first text matrix, taken from where its text starts to where it is written.
 fn emit_text_matrix(first: &Origin, emit: &Origin) -> Result<[f64; 6], EditError> {
+    // The replacement is visible text: an invisible layer's fitted matrix would squeeze it.
+    let first_tm = ocr_fit_matrix(first.tm, first.state.render_mode);
     if first.ctm == emit.ctm {
-        return Ok(first.tm);
+        return Ok(first_tm);
     }
     let emit_inv = Matrix(emit.ctm).invert().ok_or_else(|| EditError::Invalid("the paragraph has a singular transform".into()))?;
-    Ok(Matrix(first.tm).then(&Matrix(first.ctm)).then(&emit_inv).0)
+    Ok(Matrix(first_tm).then(&Matrix(first.ctm)).then(&emit_inv).0)
 }
 
 /// Line spacing in text space: the paragraph's own (scaled with the size), or 1.2 × the size.
@@ -843,6 +845,7 @@ pub(crate) fn rewrite_block_from(
     let last = members.last().copied().unwrap_or(first);
     let emit = &last.origin;
     let (font_name, ParaStyle { state: o_state, size, old_size, k }) = paragraph_style(o, style)?;
+    let mut size = size;
     let source = source_font(doc, &fonts_res, &font_name, first, &flat, style);
     let reuse = source.reuse;
     // The chosen style also determines the real Japanese fallback outlines and advances.
@@ -876,6 +879,31 @@ pub(crate) fn rewrite_block_from(
     let tm = emit_text_matrix(o, emit)?;
     let type3 = if !reuse && needs_type3(&flat) { Some(type3_font(doc, &mut fonts_res, &flat, family, bold, max_glyphs)?) } else { None };
     let source_metrics = source.metrics.as_ref().filter(|_| reuse);
+    // An OCR layer's text matrix is a uniform grid fitted to the word box, so the line's
+    // reported size is the box's height, not the type size, and a real face at that size is
+    // wider than the print. Fit the size to the line's own width so an edited scan keeps the
+    // scanned type size instead of shrinking the replacement to a squeezed third of the line.
+    if b.invisible && members.len() == 1 && upright && style.size.is_none() {
+        let probe = Advance {
+            source: source_metrics,
+            type3: type3.as_ref(),
+            family,
+            bold,
+            italic,
+            size,
+            space: source.space,
+            char_spacing: o_state.char_spacing,
+            word_spacing: o_state.word_spacing,
+            scale: o_state.scale,
+            k,
+        };
+        let natural = probe.of(&b.editor_text);
+        let box_width = (b.rect[2] - b.rect[0]).max(0.0);
+        if natural.is_finite() && natural > 0.0 && box_width > 0.0 {
+            // Only shrink: a box wider than the printed line does not make the type taller.
+            size = (size * box_width / natural).clamp(size * 0.25, size);
+        }
+    }
     let advance = Advance {
         source: source_metrics,
         type3: type3.as_ref(),

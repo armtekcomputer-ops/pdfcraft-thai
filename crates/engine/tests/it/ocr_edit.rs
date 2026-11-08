@@ -142,10 +142,11 @@ fn a_longer_ocr_phrase_grows_rightwards() {
     assert_eq!(blocks[0].rows.len(), 1, "one line");
 }
 
-/// OCR words differ in size and are stretched to fit the scan: a rewritten phrase keeps each
-/// word's width, so the words don't run into one another.
+/// OCR words differ in size and were each stretched to fit its box. A rewrite sets the phrase in
+/// one real face at the scan's type size, so the words keep their order and stay clear of one
+/// another instead of each keeping a fitted width (which squashed the glyphs into the boxes).
 #[test]
-fn a_rewritten_ocr_phrase_keeps_its_word_widths() {
+fn a_rewritten_ocr_phrase_keeps_its_words_clear() {
     let (mut s, id) = scanned_with(vec![
         scanned_word("John", 20.0, 45.0, 70.0, 10.5),
         scanned_word("Smith", 49.0, 78.0, 70.0, 11.0),
@@ -154,7 +155,10 @@ fn a_rewritten_ocr_phrase_keeps_its_word_widths() {
     s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "John Smith Exam".into(), style: Default::default() }).unwrap();
     let lines = s.get(id).unwrap().text_lines(0);
     assert_eq!(lines.iter().map(|l| l.text.trim()).collect::<Vec<_>>(), ["John", "Smith", "Exam"]);
-    assert!((lines[0].rect[2] - 45.0).abs() < 0.5, "John keeps its width: {:?}", lines[0].rect);
+    for line in &lines {
+        let (width, height) = (line.rect[2] - line.rect[0], line.rect[3] - line.rect[1]);
+        assert!(height < width, "natural proportions, not a tall squeezed word: {:?}", line.rect);
+    }
     for pair in lines.windows(2) {
         assert!(pair[1].rect[0] >= pair[0].rect[2] - 0.5, "{:?} runs into {:?}", pair[1].text, pair[0].text);
     }

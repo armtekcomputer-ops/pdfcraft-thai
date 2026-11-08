@@ -383,9 +383,18 @@ pub fn visible_text_layer_at(words: &[PlacedWord], plan: &pdfcraft_fonts::TextPl
         {
             continue;
         }
-        let size = height / BOX_EM;
         let index = word_offset.saturating_add(i);
         let runs = planned_runs(plan, index);
+        // A planned (real) face has its own advances: it is drawn at the box's height unless the
+        // word is wider than the box at that size, in which case the size shrinks until the
+        // glyphs' own advances fill the width. Deriving the size from the height alone makes
+        // Thai text about a third wider than its recognised word, and squeezing it back with
+        // `Tz` or per-character positions overlaps the strokes.
+        let height_size = height / BOX_EM;
+        let size = match &runs {
+            Some((_, total)) if *total > 0.0 => height_size.min(across / total),
+            _ => height_size,
+        };
         // A word with a zero-advance glyph (a Thai mark) or a GPOS offset is positioned one
         // character at a time: the font's own advances cannot express where a mark sits, so
         // the plan carries the offset and each glyph gets its own text matrix.

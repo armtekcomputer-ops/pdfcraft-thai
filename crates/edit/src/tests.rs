@@ -11193,3 +11193,45 @@ fn a_thai_mark_in_the_fallback_has_no_advance_and_a_shifted_outline() {
 
     assert_eq!(text::text_lines(&reopen(&doc), 0).unwrap()[0].text, word);
 }
+
+/// A recognizer's invisible layer fits every word into its picture's box with a text matrix that
+/// scales x and y differently. A replacement is real text in a real font, whose advances the
+/// layout measured at the line's size: keeping the fitted matrix squeezes the glyphs into the
+/// recognized word's width, which is what edited Thai scans looked like (overlapping strokes).
+/// Visible text keeps its own horizontal scaling.
+#[test]
+fn a_replaced_ocr_line_drops_its_anisotropic_fit() {
+    // 8.16 wide against 23.72 tall: the shape the PaddleOCR/Tesseract layer writes.
+    let mut doc = text_page("BT /F1 12 Tf 3 Tr 8.1568 0 0 23.7229 92 700 Tm (Hello) Tj ET");
+    text::rewrite_block(&mut doc, 0, 0, Some("Goodbye"), &text::BlockStyle::default()).unwrap();
+    let content = page_content(&doc);
+    // The replacement's matrix is square (a real face is not stretched per axis), and the
+    // size may only shrink: fitting the word to its line never grows it past the box height.
+    let lines: Vec<&str> = content.lines().collect();
+    let shown = lines.iter().position(|l| l.contains("(Goodbye)")).unwrap_or_else(|| panic!("the replacement is drawn: {content}"));
+    let tm = lines[..shown]
+        .iter()
+        .rev()
+        .find(|l| l.trim_end().ends_with(" Tm"))
+        .unwrap_or_else(|| panic!("the replacement's matrix: {content}"))
+        .split_whitespace()
+        .filter_map(|t| t.parse::<f64>().ok())
+        .collect::<Vec<_>>();
+    assert_eq!(tm.len(), 6, "one text matrix: {content}");
+    assert!((tm[0] - tm[3]).abs() < 1e-6, "square matrix, not a per-axis fit: {tm:?}");
+    // The glyphs keep the printed line's width (the old x scale × old size) but are no longer
+    // stretched tall: the fitted size brings the two axes together.
+    let line = text::text_lines(&reopen(&doc), 0).unwrap().into_iter().find(|l| l.text == "Goodbye").expect("the replacement line");
+    // The printed em size (the old size times the old width scale) survives; only the
+    // height's separate scale is gone, so the glyphs are no longer stretched tall.
+    assert!((line.size - 12.0 * 8.1568).abs() < 1.0, "the printed em size stays: {}", line.size);
+    let (width, height) = (line.rect[2] - line.rect[0], line.rect[3] - line.rect[1]);
+    assert!(height < width, "normal proportions, not a tall squeezed line: {:?}", line.rect);
+
+    // A visible line drawn at half width is the document's own choice and is left alone.
+    let mut doc = text_page("BT /F1 12 Tf 0 Tr 0.5 0 0 1 92 700 Tm (Hello) Tj ET");
+    text::rewrite_block(&mut doc, 0, 0, Some("Goodbye"), &text::BlockStyle::default()).unwrap();
+    let content = page_content(&doc);
+    assert!(content.contains("0.5 0 0 1"), "visible horizontal scaling stays: {content}");
+    assert_eq!(text::text_lines(&reopen(&doc), 0).unwrap()[0].text, "Goodbye");
+}

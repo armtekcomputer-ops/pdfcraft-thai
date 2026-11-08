@@ -384,6 +384,37 @@ fn page_font_metrics(
     (fonts, metrics)
 }
 
+/// How much to scale an invisible OCR line's type size so a real face matches the print.
+///
+/// The recognizer writes a uniform grid fitted to the word box, so the line's size is the box's
+/// height, and a real face at that size is wider than the scanned line (Thai came out about a
+/// third too wide and was then squeezed back, which overlapped the strokes). The scan's own
+/// width, over the source text's natural width at the reported size, recovers the printed type
+/// size. Only one-row, invisible paragraphs without an explicit size or width are fitted, and
+/// the factor only ever shrinks: a box wider than the print keeps the reported size.
+fn ocr_type_fit(
+    block: &TextBlock,
+    style: &BlockStyle,
+    first: &TextLine,
+    chars: &[(char, usize, String)],
+    measure: &impl Fn(&[(char, usize, String)]) -> Result<f64, EditError>,
+) -> Result<f64, EditError> {
+    if !(block.invisible && block.rows.len() == 1 && style.size.is_none() && style.width.is_none()) {
+        return Ok(1.0);
+    }
+    // Measure the line the scan printed, not the draft: a longer replacement must not shrink
+    // the type, it just runs further along the line.
+    let hint = chars.first().map(|c| c.2.clone()).unwrap_or_else(|| first.font.clone());
+    let source_items: Vec<(char, usize, String)> =
+        block.editor_text.chars().map(|c| (c, block.lines.first().copied().unwrap_or(0), hint.clone())).collect();
+    let measured = measure(&source_items)?;
+    let target = (block.rect[2] - block.rect[0]).max(0.0);
+    if !(measured.is_finite() && measured > 0.0 && target > 0.0) {
+        return Ok(1.0);
+    }
+    Ok((target / measured).clamp(0.25, 1.0))
+}
+
 fn paragraph_geometry(doc: &Document, page: &pdfcraft_model::Page, block: &TextBlock, style: &BlockStyle) -> Result<(f64, f64, f64), EditError> {
     if [style.size, style.line_spacing, style.char_spacing, style.scale, style.width].iter().flatten().any(|value| !value.is_finite())
         || style.color.is_some_and(|color| color.iter().any(|value| !value.is_finite()))
@@ -891,8 +922,12 @@ pub(crate) fn rewrite_styled_block(
     .prepare()?;
     let chars = prepared.values;
     let substituted = prepared.substituted;
+    // The type size an invisible OCR line is drawn at: its matrix is a uniform grid fitted to
+    // the word box, so the reported size is the box's height and a real face at that size is
+    // wider than the print. The fit factor below brings the line back to the scanned width.
+    let fit = std::cell::Cell::new(1.0f64);
     let size_of = |source: &TextLine, index: usize| {
-        overrides.get(&index).and_then(|r| r.size).or(style.size).unwrap_or(source.size).max(0.1) / source.origin.k.max(1e-6)
+        overrides.get(&index).and_then(|r| r.size).or(style.size).unwrap_or(source.size).max(0.1) * fit.get() / source.origin.k.max(1e-6)
     };
     // A source run may carry TJ kerning/justification that is absent from its text state.
     // Keep its measured advance when rebuilding the run instead of making it wrap on entry.
@@ -960,6 +995,11 @@ pub(crate) fn rewrite_styled_block(
         }
         Ok(width)
     };
+    // A single invisible line (an OCR layer over a scan) keeps the scanned type size rather
+    // than the box height the recognizer wrote: measure the draft at the reported size and
+    // scale it to the line's own width before wrapping. An explicit size or width wins.
+    // A measurement failure only means "no fitted size"; editing still works at the box size.
+    fit.set(ocr_type_fit(block, style, first, &chars, &measure).unwrap_or(1.0));
     let (rows, row_ranges, row_lines, row_soft, row_gap) = wrap_styled_rows(&chars, width, measure)?;
     let streams = content_streams(doc, &p.dict)?;
     let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
@@ -1090,7 +1130,8 @@ pub(crate) fn rewrite_styled_block(
                 state.fill = vec![Op::new("rg", vec![n(r), n(g), n(b)])];
             }
             let inverse = Matrix(o.ctm).invert().ok_or_else(|| EditError::Invalid("the paragraph has a singular transform".into()))?;
-            let mut tm = Matrix(source.origin.tm).then(&Matrix(source.origin.ctm)).then(&inverse).0;
+            let fitted = super::super::ocr_fit_matrix(source.origin.tm, source.origin.state.render_mode);
+            let mut tm = Matrix(fitted).then(&Matrix(source.origin.ctm)).then(&inverse).0;
             let (ax, ay) = back.apply(x - source.origin.x, baseline - source.origin.baseline);
             tm[4] += ax;
             tm[5] += ay;
