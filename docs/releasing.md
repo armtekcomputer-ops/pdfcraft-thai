@@ -85,6 +85,27 @@ The first directory with a complete supported pair wins, even if an earlier lega
 The release-package locations are `models\` beside `pdfcraft.exe` (MSI, portable zip), `PdfCraft.app/Contents/Resources/models` (macOS), and `share/pdfcraft/models` beside `bin/` (deb, rpm, tar.gz, AppImage, Flatpak, FreeBSD).
 The web build does not include these models, and OCR remains limited to the Latin alphabet without accents.
 
+### In-app update asset names (do not rename)
+
+`Help ▸ Check for updates` finds the build to download by the app id `pdfcraft`
+(`crate::UPDATE_APP.id` in `crates/ui-egui/src/lib.rs`), never by the display name. `craft_update`
+strips the stem, then requires `<version>-<os>-<arch>`, and downloads the kind the app was
+installed as — AppImage, `.tar.gz`, `.deb`, `.rpm` or Flatpak on Linux — so every published asset
+name MUST keep the `pdfcraft-<version>-linux-<arch>` stem:
+
+```text
+pdfcraft-<version>-linux-x86_64.tar.gz
+pdfcraft-<version>-linux-x86_64.AppImage
+pdfcraft-<version>-linux-x86_64.deb
+pdfcraft-<version>-linux-x86_64.rpm
+```
+
+A `pdfcraft-thai-<version>-linux-x86_64.tar.gz`, or any other prefix, matches nothing: the updater
+silently reports that the release has no build for this platform. The display name "PdfCraft Thai"
+is branding only; renaming the binary, the app or the window does not change the asset stem.
+`the_published_linux_asset_is_accepted_under_the_app_id` in
+`crates/ui-egui/src/platform/updates.rs` pins this rule.
+
 ### macOS
 
 `packaging/macos/package.sh` builds both architectures, joins them with `lipo`, and assembles

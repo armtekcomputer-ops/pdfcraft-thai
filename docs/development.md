@@ -71,9 +71,9 @@ do not contact a desktop session bus. Page and document colours retain their exi
 ## Logs
 
 The desktop app writes its `log` records to standard error and to `logs/pdfcraft.log` in its
-data folder: Linux and FreeBSD `~/.local/share/pdfcraft/logs/` (or
-`$XDG_DATA_HOME/pdfcraft/logs/`), macOS `~/Library/Application Support/PdfCraft/logs/`, Windows
-`%APPDATA%\PdfCraft\data\logs\`. In portable mode (a `portable.txt` file next to the executable, as
+data folder: Linux and FreeBSD `~/.local/share/pdfcraft-thai/logs/` (or
+`$XDG_DATA_HOME/pdfcraft-thai/logs/`), macOS `~/Library/Application Support/pdfcraft-thai/logs/`,
+Windows `%APPDATA%\pdfcraft-thai\data\logs\`. In portable mode (a `portable.txt` file next to the executable, as
 the Windows portable zip ships) the settings folder is `PdfCraftData\` beside the executable, and
 crash recovery and new digital IDs go there too. A start from a desktop menu, Finder or the Start
 menu has no terminal, so this file is what to attach to a bug report: a failed autosave, a page that
@@ -128,15 +128,26 @@ driver's shader compilation, and explicit `PDFCRAFT_RENDERER=wgpu` still disable
 
 ## Preferences
 
-Linux and FreeBSD store `app.ron` in `$XDG_CONFIG_HOME/pdfcraft/`, or
-`~/.config/pdfcraft/` when that variable is unset, empty or relative. This follows the
+Linux and FreeBSD store `app.ron` in `$XDG_CONFIG_HOME/pdfcraft-thai/`, or
+`~/.config/pdfcraft-thai/` when that variable is unset, empty or relative. This follows the
 [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/latest/).
-On first launch after upgrading, existing `app.ron` preferences are copied from the old
-data folder without replacing an existing configuration file. The old copy is retained;
-logs, crash recovery and digital IDs stay in their data locations. If migration fails,
-the app logs the failure and continues using the original preferences folder.
-The existing PrintCraft-to-PdfCraft migration runs first. macOS, Windows and portable
-copies retain their current preferences locations.
+Nothing is imported from another PdfCraft's folders: this build keeps its own preferences,
+recents, logs, crash recovery and digital IDs. When no configuration base resolves, preferences
+stay in this build's data folder instead of being dropped.
+macOS, Windows and portable copies keep their preferences in this build's own folders
+(`pdfcraft-thai` in Application Support or `%APPDATA%\pdfcraft-thai\data`, `PdfCraftData` beside the
+executable).
+
+Crash-recovery snapshots, the OCR dictionary, `Digital IDs` and the clipboard cache written by
+builds before this separation remain in the other folders: `$XDG_DATA_HOME/pdfcraft` (or
+`~/.local/share/pdfcraft` when `XDG_DATA_HOME` is unset) and `$XDG_CACHE_HOME/pdfcraft` (or
+`~/.cache/pdfcraft`) on Linux and FreeBSD, `~/Library/Application Support/PdfCraft` and
+`~/Library/Caches/PdfCraft` on macOS, `%LOCALAPPDATA%\PdfCraft` on Windows. This build does not
+import them, because importing another app's data is deliberately avoided. Recovery snapshots and
+the dictionary can be copied by hand into the matching `pdfcraft-thai` folder. Digital IDs must be
+imported through the app: copying a `.p12` does not register it. The clipboard cache holds only the
+last copied image, so it is not worth copying. At startup the log names each old folder that still
+contains files (not in portable mode, whose folders may belong to someone else).
 
 ## Environment variables
 
@@ -144,8 +155,8 @@ copies retain their current preferences locations.
 |---|---|
 | `RUST_LOG` | Log levels for standard error and the log file (see [Logs](#logs)) |
 | `RUST_BACKTRACE` | `1` adds a backtrace to the report of an internal error |
-| `XDG_CONFIG_HOME` | Linux/FreeBSD: absolute configuration base for `pdfcraft/app.ron`; defaults to `~/.config` |
-| `XDG_DATA_HOME` | Linux/FreeBSD: base of the log folder and crash recovery; previous preferences are migrated from here |
+| `XDG_CONFIG_HOME` | Linux/FreeBSD: absolute configuration base for `pdfcraft-thai/app.ron`; defaults to `~/.config` |
+| `XDG_DATA_HOME` | Linux/FreeBSD: base of the log folder and `pdfcraft-thai/recovery` |
 | `WGPU_POWER_PREF` | GPU choice; by default PdfCraft draws on the GPU the Wayland compositor draws with (it says so through linux-dmabuf feedback), else the GPU that drives the primary display (Windows) or the built-in panel (Linux), else the low-power (integrated) GPU. The log says which one was chosen |
 | `WGPU_BACKEND` | Graphics backend; by default Windows uses Direct3D 12, falling back to OpenGL |
 | `WGPU_DX12_PRESENTATION_SYSTEM` | Windows, Direct3D 12: `hwnd` presents through a swap chain on the window itself, which Windows stretches while the window is resized (#2738); unset or `visual`, PdfCraft presents through a DirectComposition visual |
