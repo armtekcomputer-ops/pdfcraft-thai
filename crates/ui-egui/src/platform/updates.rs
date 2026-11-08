@@ -105,7 +105,9 @@ pub(crate) fn dialog(app: &mut PdfCraftApp, ctx: &egui::Context) {
             app.updates.open = false;
         }
         if app.updates.open {
-            let dialog = CheckResultDialog::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION"));
+            // The result dialog names this build; the updater itself keeps `UPDATE_APP` so
+            // detection and asset matching still use the `pdfcraft` machine name.
+            let dialog = CheckResultDialog::new(&crate::UPDATE_DIALOG_APP, env!("CARGO_PKG_VERSION"));
             match dialog.show(ctx, app.updates.updater.status()) {
                 CheckResultResponse::None => {}
                 CheckResultResponse::Close => {
@@ -174,5 +176,15 @@ mod tests {
             craft_update::platform::parse_asset_name("pdfcraft-thai-0.18.1-linux-x86_64.tar.gz", &[crate::UPDATE_APP.id]).is_none(),
             "a pdfcraft-thai prefix must not be used for release assets"
         );
+    }
+
+    /// The result dialog names this build, but detection and asset matching still read the
+    /// machine name: only the display name may differ.
+    #[test]
+    fn the_update_dialog_names_this_build() {
+        assert_eq!(crate::UPDATE_DIALOG_APP.name, crate::APP_NAME);
+        assert_eq!(crate::UPDATE_DIALOG_APP.id, crate::UPDATE_APP.id);
+        assert_eq!(crate::UPDATE_DIALOG_APP.repo, crate::UPDATE_APP.repo);
+        assert_eq!(crate::UPDATE_DIALOG_APP.releases_url(), RELEASES_PAGE);
     }
 }

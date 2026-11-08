@@ -34,6 +34,12 @@ pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
     ..craft_update::suite::PDFCRAFT
 };
 
+/// The same app for the update dialogs to name: only the display name changes, so the prompt
+/// says "PdfCraft Thai" beside this build's window title. Detection, asset matching and the
+/// installers keep reading [`UPDATE_APP`], whose `id` and `name` are still `pdfcraft`.
+#[cfg(not(target_arch = "wasm32"))]
+pub const UPDATE_DIALOG_APP: craft_update::app::App = craft_update::app::App { name: APP_NAME, ..UPDATE_APP };
+
 use crate::control::Host as _;
 
 /// Translate an English UI string into the current language (see [`i18n`]).
